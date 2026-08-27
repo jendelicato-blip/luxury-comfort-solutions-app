@@ -726,6 +726,11 @@ function bulkUnitPrice(basePrice, qty) {
   return tier ? basePrice * (1 - tier.off) : basePrice;
 }
 
+// Real USPS Ground Advantage cost for a small package is ~$4.50; a flat delivery fee covers
+// that with a small buffer, waived at 3+ filters since one box ships several just as cheaply.
+const DELIVERY_FEE = 5.99;
+const FREE_DELIVERY_MIN_QTY = 3;
+
 function OrderFiltersScreen({ nav, placeOrder, products }) {
   const [cart, setCart] = useState({});
   const [delivery, setDelivery] = useState("delivery");
@@ -735,7 +740,10 @@ function OrderFiltersScreen({ nav, placeOrder, products }) {
     return { ...c, [id]: next };
   });
   const items = Object.entries(cart).filter(([, q]) => q > 0);
-  const total = items.reduce((s, [id, q]) => s + bulkUnitPrice(Number(products.find(p => p.id === id).price), q) * q, 0);
+  const totalQty = items.reduce((s, [, q]) => s + q, 0);
+  const subtotal = items.reduce((s, [id, q]) => s + bulkUnitPrice(Number(products.find(p => p.id === id).price), q) * q, 0);
+  const deliveryFee = delivery === "delivery" && totalQty > 0 && totalQty < FREE_DELIVERY_MIN_QTY ? DELIVERY_FEE : 0;
+  const total = subtotal + deliveryFee;
 
   return (
     <div style={{ height: "100%", overflowY: "auto" }}>
@@ -770,6 +778,11 @@ function OrderFiltersScreen({ nav, placeOrder, products }) {
               <div key={val} onClick={() => setDelivery(val)} style={{ flex: 1, textAlign: "center", padding: "10px 0", borderRadius: 12, cursor: "pointer", background: delivery === val ? C.terracotta : "#fff", color: delivery === val ? "#fff" : C.ink, border: `1px solid ${C.line}`, fontFamily: BODY, fontWeight: 600, fontSize: 13 }}>{label}</div>
             ))}
           </div>
+          {delivery === "delivery" && (
+            <div style={{ fontFamily: BODY, fontSize: 11.5, color: C.ash, marginTop: 6 }}>
+              ${DELIVERY_FEE.toFixed(2)} delivery fee · free on orders of {FREE_DELIVERY_MIN_QTY}+ filters
+            </div>
+          )}
         </div>
 
         <div>
@@ -791,6 +804,12 @@ function OrderFiltersScreen({ nav, placeOrder, products }) {
                 </div>
               );
             })}
+            {delivery === "delivery" && (
+              <div style={{ display: "flex", justifyContent: "space-between", fontFamily: BODY, fontSize: 13, padding: "4px 0" }}>
+                <span>Delivery Fee</span>
+                {deliveryFee > 0 ? <span>${deliveryFee.toFixed(2)}</span> : <span style={{ color: C.leaf, fontWeight: 700 }}>Free ({FREE_DELIVERY_MIN_QTY}+ filters)</span>}
+              </div>
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", fontFamily: BODY, fontWeight: 700, fontSize: 14, marginTop: 8, borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
               <span>Estimated Total</span><span>${total.toFixed(2)}</span>
             </div>
@@ -801,7 +820,7 @@ function OrderFiltersScreen({ nav, placeOrder, products }) {
         <PrimaryButton full disabled={items.length === 0} onClick={() => placeOrder(items.map(([id, q]) => {
           const p = products.find(pp => pp.id === id);
           return { product_id: id, name: p.name, quantity: q, unit_price: bulkUnitPrice(Number(p.price), q) };
-        }), delivery, notes)}>Submit Order</PrimaryButton>
+        }), delivery, notes, deliveryFee)}>Submit Order</PrimaryButton>
       </div>
     </div>
   );
@@ -1486,7 +1505,7 @@ function CustomerApp() {
     setScreen("appointments");
   };
 
-  const placeOrder = async (items, delivery, notes) => {
+  const placeOrder = async (items, delivery, notes, deliveryFee) => {
     const orderPayload = [{
       order_number: "LCS-" + Math.floor(1000 + Math.random() * 9000),
       customer_id: data.customer.id,
@@ -1495,6 +1514,7 @@ function CustomerApp() {
       billing_status: "not_billed",
       delivery_preference: delivery,
       customer_notes: notes || null,
+      internal_notes: deliveryFee > 0 ? `Delivery fee: $${deliveryFee.toFixed(2)}` : (delivery === "delivery" ? "Delivery fee waived (3+ filters)" : null),
     }];
     const [order] = await restRequest("orders", { method: "POST", token: session.access_token, body: orderPayload, prefer: "return=representation" });
     const itemsPayload = items.map((it) => ({ order_id: order.id, product_id: it.product_id, quantity: it.quantity, unit_price_at_order: it.unit_price }));
