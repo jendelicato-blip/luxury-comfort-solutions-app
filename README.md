@@ -40,10 +40,26 @@ npm install
 npm run dev
 ```
 
-Opens at `http://localhost:5173`. No `.env` file is required — the Supabase project URL and
+Opens at `http://localhost:5173`. No `.env` file is required for Supabase — the project URL and
 publishable ("anon") key are already in `src/App.jsx` near the top (`SUPABASE_URL`,
 `SUPABASE_ANON_KEY`). The anon key is safe to keep in client code; Row Level Security is what
 actually restricts access, not the key itself.
+
+Address autocomplete does need a key: copy `.env.example` to `.env` and set
+`VITE_GOOGLE_PLACES_API_KEY` to a Google Cloud API key with the Places API enabled (see "Known
+gaps" below). `.env` is gitignored.
+
+## Deploying (GitHub Pages)
+
+A push to `main` (or the active feature branch — see `.github/workflows/deploy.yml`) builds the
+app and deploys it to GitHub Pages automatically. One-time setup:
+
+1. In the repo, go to **Settings → Pages** and set **Source** to **GitHub Actions**.
+2. Go to **Settings → Secrets and variables → Actions** and add a repository secret named
+   `VITE_GOOGLE_PLACES_API_KEY` with your Places API key (make sure its HTTP referrer
+   restriction in Google Cloud Console includes `https://<your-username>.github.io/*`).
+
+The site then publishes to `https://<your-username>.github.io/luxury-comfort-solutions-app/`.
 
 ## Credentials for testing
 
@@ -63,10 +79,12 @@ Email → "Confirm email") for faster local testing.
 
 ## Known gaps / next steps
 
-1. **Address autocomplete** — not yet implemented. Recommended approach: Google Places
-   Autocomplete API on the sign-up address field. Needs a Google Cloud API key
-   (Places API enabled, billing account, key restricted to your domain). Wire it into the
-   `addressLine1` input in the `LoginScreen` component's signup form in `src/App.jsx`.
+1. ~~**Address autocomplete**~~ — done. `google.maps.places.Autocomplete` is wired into the
+   `addressLine1` input in the `LoginScreen` component's signup form in `src/App.jsx`; selecting
+   a suggestion also fills `city`/`state`/`postalCode`. The key is read from
+   `VITE_GOOGLE_PLACES_API_KEY` (a local `.env` file for `npm run dev`, or the
+   `VITE_GOOGLE_PLACES_API_KEY` GitHub Actions secret for the Pages deploy — see below) and is
+   restricted by HTTP referrer + to the Places API only in Google Cloud Console.
 2. **Stripe billing** — membership pricing is illustrative only; no payment is actually processed.
    This needs a secure backend endpoint (e.g. a Supabase Edge Function) holding the Stripe secret
    key — never put a Stripe secret key in this frontend code.

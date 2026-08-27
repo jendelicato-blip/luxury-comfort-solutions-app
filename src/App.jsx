@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Home, Wrench, Boxes, CalendarDays, User, Phone, Mail, MapPin, Star,
   Snowflake, Leaf, Sun, ChevronLeft, ChevronRight, Bell, ShieldCheck,
@@ -34,6 +34,35 @@ const fontLink = (
 // Security policies on the database are what actually restrict access.
 const SUPABASE_URL = "https://yiceopvfkeezqcvpratd.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlpY2VvcHZma2VlenFjdnByYXRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3MTExMzIsImV4cCI6MjEwMzI4NzEzMn0.9c4UStu90J7zP0yP8Y0UC75Eh1WtRgr0Xy0DcHffh4s";
+
+/* ============================= GOOGLE PLACES CONFIG ============================= */
+const GOOGLE_PLACES_API_KEY = import.meta.env.VITE_GOOGLE_PLACES_API_KEY;
+
+let googleMapsLoadPromise = null;
+function loadGooglePlaces() {
+  if (googleMapsLoadPromise) return googleMapsLoadPromise;
+  googleMapsLoadPromise = new Promise((resolve, reject) => {
+    if (window.google?.maps?.places) return resolve(window.google);
+    const script = document.createElement("script");
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_PLACES_API_KEY}&libraries=places&loading=async`;
+    script.async = true;
+    script.onload = () => resolve(window.google);
+    script.onerror = () => reject(new Error("Failed to load Google Places"));
+    document.head.appendChild(script);
+  });
+  return googleMapsLoadPromise;
+}
+
+// Splits a Google Places address_components array into the fields the signup form tracks.
+function parseAddressComponents(components) {
+  const get = (type) => components.find((c) => c.types.includes(type));
+  const streetNumber = get("street_number")?.long_name || "";
+  const route = get("route")?.long_name || "";
+  const city = get("locality")?.long_name || get("sublocality")?.long_name || get("postal_town")?.long_name || "";
+  const state = get("administrative_area_level_1")?.short_name || "";
+  const postalCode = get("postal_code")?.long_name || "";
+  return { addressLine1: [streetNumber, route].filter(Boolean).join(" "), city, state, postalCode };
+}
 
 async function authRequest(path, body) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
@@ -299,6 +328,32 @@ function LoginScreen({ onSignIn, onSignUp, loading, error, info }) {
     addressLine1: "", city: "Lincoln", state: "NE", postalCode: "",
   });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const addressInputRef = useRef(null);
+
+  useEffect(() => {
+    if (mode !== "signup" || !GOOGLE_PLACES_API_KEY) return;
+    let autocomplete;
+    let cancelled = false;
+    loadGooglePlaces()
+      .then(() => {
+        if (cancelled || !addressInputRef.current) return;
+        autocomplete = new window.google.maps.places.Autocomplete(addressInputRef.current, {
+          types: ["address"],
+          componentRestrictions: { country: "us" },
+          fields: ["address_components"],
+        });
+        autocomplete.addListener("place_changed", () => {
+          const place = autocomplete.getPlace();
+          if (!place.address_components) return;
+          setForm((f) => ({ ...f, ...parseAddressComponents(place.address_components) }));
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (autocomplete) window.google.maps.event.clearInstanceListeners(autocomplete);
+    };
+  }, [mode]);
 
   const inputStyle = { fontFamily: BODY, padding: "13px 14px", borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 15, background: C.paper, width: "100%" };
 
@@ -315,7 +370,7 @@ function LoginScreen({ onSignIn, onSignUp, loading, error, info }) {
               <input style={inputStyle} placeholder="First name" value={form.firstName} onChange={(e) => set("firstName", e.target.value)} />
               <input style={inputStyle} placeholder="Last name" value={form.lastName} onChange={(e) => set("lastName", e.target.value)} />
               <input style={inputStyle} placeholder="Phone number" value={form.phone} onChange={(e) => set("phone", e.target.value)} />
-              <input style={inputStyle} placeholder="Service address" value={form.addressLine1} onChange={(e) => set("addressLine1", e.target.value)} />
+              <input ref={addressInputRef} autoComplete="off" style={inputStyle} placeholder="Service address" value={form.addressLine1} onChange={(e) => set("addressLine1", e.target.value)} />
             </>
           )}
           <input style={inputStyle} placeholder="Email address" value={form.email} onChange={(e) => set("email", e.target.value)} />
