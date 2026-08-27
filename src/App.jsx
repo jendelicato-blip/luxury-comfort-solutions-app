@@ -64,6 +64,37 @@ function parseAddressComponents(components) {
   return { addressLine1: [streetNumber, route].filter(Boolean).join(" "), city, state, postalCode };
 }
 
+// Attaches google.maps.places.Autocomplete to the returned ref while `active` is true;
+// calls onPlace(parsedAddress) when the user picks a suggestion.
+function useGooglePlacesAutocomplete(active, onPlace) {
+  const inputRef = useRef(null);
+  useEffect(() => {
+    if (!active || !GOOGLE_PLACES_API_KEY) return;
+    let autocomplete;
+    let cancelled = false;
+    loadGooglePlaces()
+      .then(() => {
+        if (cancelled || !inputRef.current) return;
+        autocomplete = new window.google.maps.places.Autocomplete(inputRef.current, {
+          types: ["address"],
+          componentRestrictions: { country: "us" },
+          fields: ["address_components"],
+        });
+        autocomplete.addListener("place_changed", () => {
+          const place = autocomplete.getPlace();
+          if (!place.address_components) return;
+          onPlace(parseAddressComponents(place.address_components));
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (autocomplete) window.google.maps.event.clearInstanceListeners(autocomplete);
+    };
+  }, [active]);
+  return inputRef;
+}
+
 async function authRequest(path, body) {
   const res = await fetch(`${SUPABASE_URL}/auth/v1/${path}`, {
     method: "POST",
@@ -328,32 +359,7 @@ function LoginScreen({ onSignIn, onSignUp, loading, error, info }) {
     addressLine1: "", city: "Lincoln", state: "NE", postalCode: "",
   });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-  const addressInputRef = useRef(null);
-
-  useEffect(() => {
-    if (mode !== "signup" || !GOOGLE_PLACES_API_KEY) return;
-    let autocomplete;
-    let cancelled = false;
-    loadGooglePlaces()
-      .then(() => {
-        if (cancelled || !addressInputRef.current) return;
-        autocomplete = new window.google.maps.places.Autocomplete(addressInputRef.current, {
-          types: ["address"],
-          componentRestrictions: { country: "us" },
-          fields: ["address_components"],
-        });
-        autocomplete.addListener("place_changed", () => {
-          const place = autocomplete.getPlace();
-          if (!place.address_components) return;
-          setForm((f) => ({ ...f, ...parseAddressComponents(place.address_components) }));
-        });
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-      if (autocomplete) window.google.maps.event.clearInstanceListeners(autocomplete);
-    };
-  }, [mode]);
+  const addressInputRef = useGooglePlacesAutocomplete(mode === "signup", (parsed) => setForm((f) => ({ ...f, ...parsed })));
 
   const inputStyle = { fontFamily: BODY, padding: "13px 14px", borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 15, background: C.paper, width: "100%" };
 
@@ -1251,7 +1257,10 @@ function AccountScreen({ nav, customer, property, onLogOut }) {
         </div>
       </div>
       <Card style={{ marginBottom: 14, fontFamily: BODY, fontSize: 13 }}>
-        <div style={{ marginBottom: 6 }}><b>Service address:</b> {property ? `${property.address_line1}, ${property.city}, ${property.state} ${property.postal_code}` : "—"}</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 6 }}>
+          <div><b>Service address:</b> {property ? `${property.address_line1}, ${property.city}, ${property.state} ${property.postal_code}` : "—"}</div>
+          <span onClick={() => nav("editAddress")} style={{ fontFamily: BODY, fontWeight: 700, fontSize: 12.5, color: C.terracotta, cursor: "pointer", flexShrink: 0 }}>Edit</span>
+        </div>
         <div style={{ marginBottom: 6 }}><b>Preferred contact:</b> {humanize(customer.preferred_contact)}</div>
         <div><b>Phone:</b> {customer.phone || "—"} · <b>Email:</b> {customer.email}</div>
       </Card>
@@ -1264,6 +1273,40 @@ function AccountScreen({ nav, customer, property, onLogOut }) {
         ))}
       </Card>
       <div style={{ marginTop: 14 }}><GhostButton full onClick={onLogOut}>Log Out</GhostButton></div>
+    </div>
+  );
+}
+
+function EditAddressScreen({ nav, property, onSave, loading, error }) {
+  const [form, setForm] = useState({
+    addressLine1: property?.address_line1 || "", city: property?.city || "",
+    state: property?.state || "", postalCode: property?.postal_code || "",
+  });
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const addressInputRef = useGooglePlacesAutocomplete(true, (parsed) => setForm((f) => ({ ...f, ...parsed })));
+  const inputStyle = { fontFamily: BODY, padding: "13px 14px", borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 15, background: C.paper, width: "100%" };
+
+  const save = async () => {
+    const ok = await onSave(form);
+    if (ok) nav("account");
+  };
+
+  return (
+    <div style={{ height: "100%", overflowY: "auto" }}>
+      <AppBar title="Edit Service Address" onBack={() => nav("account")} />
+      <div style={{ padding: "0 18px 30px", display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginBottom: 4 }}>
+          Moving? Start typing your new address and pick it from the suggestions, or edit the fields directly.
+        </div>
+        <input ref={addressInputRef} autoComplete="off" style={inputStyle} placeholder="Street address" value={form.addressLine1} onChange={(e) => set("addressLine1", e.target.value)} />
+        <input style={inputStyle} placeholder="City" value={form.city} onChange={(e) => set("city", e.target.value)} />
+        <div style={{ display: "flex", gap: 10 }}>
+          <input style={{ ...inputStyle, flex: 1 }} placeholder="State" value={form.state} onChange={(e) => set("state", e.target.value)} />
+          <input style={{ ...inputStyle, flex: 1 }} placeholder="ZIP code" value={form.postalCode} onChange={(e) => set("postalCode", e.target.value)} />
+        </div>
+        {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple }}>{error}</div>}
+        <div style={{ marginTop: 8 }}><PrimaryButton full disabled={loading} onClick={save}>{loading ? "Saving…" : "Save Address"}</PrimaryButton></div>
+      </div>
     </div>
   );
 }
@@ -1296,6 +1339,8 @@ function CustomerApp() {
   const [lastOrder, setLastOrder] = useState(null);
   const [planActionLoading, setPlanActionLoading] = useState(false);
   const [planActionError, setPlanActionError] = useState(null);
+  const [addressActionLoading, setAddressActionLoading] = useState(false);
+  const [addressActionError, setAddressActionError] = useState(null);
 
   const nav = (s, payload) => { setScreen(s); setNavPayload(payload || null); };
 
@@ -1478,6 +1523,21 @@ function CustomerApp() {
     await restRequest(`notification_preferences?customer_id=eq.${data.customer.id}`, { method: "PATCH", token: session.access_token, body: { marketing_enabled: next } });
   };
 
+  const updateAddress = async (form) => {
+    setAddressActionLoading(true); setAddressActionError(null);
+    try {
+      const body = { address_line1: form.addressLine1, city: form.city, state: form.state, postal_code: form.postalCode };
+      const [property] = await restRequest(`properties?id=eq.${data.property.id}`, { method: "PATCH", token: session.access_token, body, prefer: "return=representation" });
+      setData((d) => ({ ...d, property }));
+      return true;
+    } catch (e) {
+      setAddressActionError(e.message);
+      return false;
+    } finally {
+      setAddressActionLoading(false);
+    }
+  };
+
   if (!session) return <LoginScreen onSignIn={handleSignIn} onSignUp={handleSignUp} loading={authLoading} error={authError} info={authInfo} />;
   if (dataLoading || !data) {
     return (
@@ -1508,11 +1568,12 @@ function CustomerApp() {
   else if (screen === "contact") body = <ContactScreen nav={nav} />;
   else if (screen === "notifications") body = <NotificationsScreen nav={nav} notifications={data.notifications} marketingEnabled={data.marketingEnabled} onToggleMarketing={toggleMarketing} />;
   else if (screen === "account") body = <AccountScreen nav={nav} customer={data.customer} property={data.property} onLogOut={logOut} />;
+  else if (screen === "editAddress") body = <EditAddressScreen nav={nav} property={data.property} onSave={updateAddress} loading={addressActionLoading} error={addressActionError} />;
   else body = <CustomerHome nav={nav} state={data} />;
 
   const tabKey = ["newRequest", "requestConfirmed", "emergency", "scheduleAppt"].includes(screen) ? "service"
     : ["orderFilters", "orderConfirmed"].includes(screen) ? "orders"
-    : ["history", "plan", "membershipPlans", "reminders", "promotions", "financing", "rebates", "contact", "notifications"].includes(screen) ? "account"
+    : ["history", "plan", "membershipPlans", "reminders", "promotions", "financing", "rebates", "contact", "notifications", "editAddress"].includes(screen) ? "account"
     : screen === "appointments" ? "home"
     : screen;
 
