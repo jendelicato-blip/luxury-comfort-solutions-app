@@ -712,6 +712,20 @@ function AppointmentsScreen({ nav, appointments }) {
 
 /* ============================= ORDER FILTERS / PRODUCTS ============================= */
 
+// Quantity discount: order 3+, 6+, or 12+ of the same filter and the per-unit price drops.
+const BULK_DISCOUNT_TIERS = [
+  { min: 12, off: 0.20, label: "12+: 20% off" },
+  { min: 6, off: 0.15, label: "6+: 15% off" },
+  { min: 3, off: 0.10, label: "3+: 10% off" },
+];
+function bulkTier(qty) {
+  return BULK_DISCOUNT_TIERS.find((t) => qty >= t.min) || null;
+}
+function bulkUnitPrice(basePrice, qty) {
+  const tier = bulkTier(qty);
+  return tier ? basePrice * (1 - tier.off) : basePrice;
+}
+
 function OrderFiltersScreen({ nav, placeOrder, products }) {
   const [cart, setCart] = useState({});
   const [delivery, setDelivery] = useState("delivery");
@@ -721,25 +735,33 @@ function OrderFiltersScreen({ nav, placeOrder, products }) {
     return { ...c, [id]: next };
   });
   const items = Object.entries(cart).filter(([, q]) => q > 0);
-  const total = items.reduce((s, [id, q]) => s + Number(products.find(p => p.id === id).price) * q, 0);
+  const total = items.reduce((s, [id, q]) => s + bulkUnitPrice(Number(products.find(p => p.id === id).price), q) * q, 0);
 
   return (
     <div style={{ height: "100%", overflowY: "auto" }}>
       <AppBar title="Order Filters & Supplies" onBack={() => nav("home")} />
       <div style={{ padding: "0 18px 130px", display: "flex", flexDirection: "column", gap: 10 }}>
-        {products.filter(p => p.is_active).map(p => (
-          <Card key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 13.5 }}>{p.name}</div>
-              <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash }}>{p.product_categories ? p.product_categories.name : ""}{p.merv_rating ? ` · MERV ${p.merv_rating}` : ""} · ${Number(p.price).toFixed(2)}</div>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div onClick={() => add(p.id, -1)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><Minus size={14} /></div>
-              <div style={{ fontFamily: BODY, fontWeight: 700, width: 16, textAlign: "center" }}>{cart[p.id] || 0}</div>
-              <div onClick={() => add(p.id, 1)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><Plus size={14} /></div>
-            </div>
-          </Card>
-        ))}
+        <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash }}>Buy more, save more: 3+ save 10%, 6+ save 15%, 12+ save 20% (per filter).</div>
+        {products.filter(p => p.is_active).map(p => {
+          const qty = cart[p.id] || 0;
+          const tier = bulkTier(qty);
+          return (
+            <Card key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 13.5 }}>{p.name}</div>
+                <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash }}>{p.product_categories ? p.product_categories.name : ""}{p.merv_rating ? ` · MERV ${p.merv_rating}` : ""} · ${Number(p.price).toFixed(2)} each</div>
+                <div style={{ fontFamily: BODY, fontSize: 11.5, color: tier ? C.leaf : C.ash, marginTop: 2, fontWeight: tier ? 700 : 400 }}>
+                  {tier ? `${tier.label} applied · $${bulkUnitPrice(Number(p.price), qty).toFixed(2)} each` : "3+: 10% · 6+: 15% · 12+: 20% off"}
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div onClick={() => add(p.id, -1)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><Minus size={14} /></div>
+                <div style={{ fontFamily: BODY, fontWeight: 700, width: 16, textAlign: "center" }}>{qty}</div>
+                <div onClick={() => add(p.id, 1)} style={{ width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}><Plus size={14} /></div>
+              </div>
+            </Card>
+          );
+        })}
 
         <div style={{ marginTop: 6 }}>
           <SectionLabel>Delivery / Pickup</SectionLabel>
@@ -760,7 +782,14 @@ function OrderFiltersScreen({ nav, placeOrder, products }) {
             <SectionLabel>Order Summary</SectionLabel>
             {items.map(([id, q]) => {
               const p = products.find(pp => pp.id === id);
-              return <div key={id} style={{ display: "flex", justifyContent: "space-between", fontFamily: BODY, fontSize: 13, padding: "4px 0" }}><span>{q} × {p.name}</span><span>${(Number(p.price) * q).toFixed(2)}</span></div>;
+              const unitPrice = bulkUnitPrice(Number(p.price), q);
+              const tier = bulkTier(q);
+              return (
+                <div key={id} style={{ display: "flex", justifyContent: "space-between", fontFamily: BODY, fontSize: 13, padding: "4px 0" }}>
+                  <span>{q} × {p.name}{tier ? ` (${Math.round(tier.off * 100)}% off)` : ""}</span>
+                  <span>${(unitPrice * q).toFixed(2)}</span>
+                </div>
+              );
             })}
             <div style={{ display: "flex", justifyContent: "space-between", fontFamily: BODY, fontWeight: 700, fontSize: 14, marginTop: 8, borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
               <span>Estimated Total</span><span>${total.toFixed(2)}</span>
@@ -769,7 +798,10 @@ function OrderFiltersScreen({ nav, placeOrder, products }) {
           </Card>
         )}
 
-        <PrimaryButton full disabled={items.length === 0} onClick={() => placeOrder(items.map(([id, q]) => ({ product_id: id, name: products.find(p => p.id === id).name, quantity: q, unit_price: products.find(p => p.id === id).price })), delivery, notes)}>Submit Order</PrimaryButton>
+        <PrimaryButton full disabled={items.length === 0} onClick={() => placeOrder(items.map(([id, q]) => {
+          const p = products.find(pp => pp.id === id);
+          return { product_id: id, name: p.name, quantity: q, unit_price: bulkUnitPrice(Number(p.price), q) };
+        }), delivery, notes)}>Submit Order</PrimaryButton>
       </div>
     </div>
   );
