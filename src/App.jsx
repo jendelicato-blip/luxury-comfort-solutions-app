@@ -1955,10 +1955,12 @@ function JobCard({ job, onOpen, onStart, onCall, onDirections }) {
   );
 }
 
-function JobScreen({ job, equipmentByProperty, onBack, onStart, onCall, onText, onDirections, onOpenModal, onOpenHistory }) {
+function JobScreen({ job, equipmentByProperty, onBack, onStart, onUndoStart, onCall, onText, onDirections, onOpenModal, onOpenHistory }) {
   const sc = statusColor(humanize(job.status));
   const Icon = serviceLineIcon(job.service_lines ? job.service_lines.key : null);
-  const started = ["in_progress", "completed"].includes(job.status);
+  const inProgress = job.status === "in_progress";
+  const isCompleted = job.status === "completed";
+  const started = inProgress || isCompleted;
   const equipment = equipmentByProperty[job.property_id] || [];
   const phone = job.customers.users?.phone;
 
@@ -2018,7 +2020,17 @@ function JobScreen({ job, equipmentByProperty, onBack, onStart, onCall, onText, 
         <div>
           <SectionLabel>Actions</SectionLabel>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <BigActionButton label={started ? "✅ Job Started" : "🔧 Start Job"} sub={started ? "Work is in progress" : "Tap to begin this job"} onClick={() => !started && onStart(job)} disabled={started} done={started} />
+            <BigActionButton
+              label={isCompleted ? "✅ Job Completed" : inProgress ? "✅ Job Started" : "🔧 Start Job"}
+              sub={isCompleted ? "This job is complete" : inProgress ? "In progress — tap to undo" : "Tap to begin this job"}
+              onClick={() => {
+                if (isCompleted) return;
+                if (inProgress) { if (window.confirm("Undo Start Job? This puts the job back to not-started.")) onUndoStart(job); }
+                else onStart(job);
+              }}
+              disabled={isCompleted}
+              done={started}
+            />
             <BigActionButton label="📸 Add Photos" sub="Camera or gallery" onClick={() => onOpenModal("photos")} />
             <BigActionButton label="📝 Service Notes" sub="What you found & did" onClick={() => onOpenModal("notes")} />
             <BigActionButton label="🔩 Parts Used" sub="Track parts for this job" onClick={() => onOpenModal("parts")} />
@@ -2730,6 +2742,15 @@ function TechnicianApp() {
     refreshPending();
   };
 
+  // Lets a technician back out of an accidental Start Job tap. Puts the job back to
+  // "technician_assigned" — anything already saved (notes, photos, parts) is untouched.
+  const undoStart = async (job) => {
+    if (job.status !== "in_progress") return;
+    const [updated] = await patchRow("service_requests", `id=eq.${job.id}`, { status: "technician_assigned" }, { token: session.access_token });
+    setJobs((js) => js.map((j) => (j.id === job.id ? { ...j, ...updated, status: "technician_assigned" } : j)));
+    refreshPending();
+  };
+
   const call = (phone) => { if (phone) window.location.href = `tel:${phone}`; };
   const text = (phone) => { if (phone) window.location.href = `sms:${phone}`; };
   const directions = (property) => { window.open(directionsUrl(property), "_blank"); };
@@ -2765,7 +2786,7 @@ function TechnicianApp() {
     body = (
       <JobScreen
         job={currentJob} equipmentByProperty={equipmentByProperty}
-        onBack={() => setOpenJobId(null)} onStart={startJob} onCall={call} onText={text} onDirections={directions}
+        onBack={() => setOpenJobId(null)} onStart={startJob} onUndoStart={undoStart} onCall={call} onText={text} onDirections={directions}
         onOpenModal={(type, data) => setModal({ type, data })}
         onOpenHistory={(customerId, name) => setHistoryFor({ customerId, name })}
       />
