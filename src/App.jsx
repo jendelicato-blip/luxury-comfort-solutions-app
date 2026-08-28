@@ -5,7 +5,8 @@ import {
   FileText, Tag, Camera, CheckCircle2, Truck, ClipboardList, Users,
   Settings, BarChart3, Search, ShoppingBag, Package, PhoneCall, Plus, Minus,
   Droplet, Zap, ClipboardCheck, Radiation, DollarSign, BadgePercent,
-  Facebook, Instagram, Youtube, Image as ImageIcon, Award
+  Facebook, Instagram, Youtube, Image as ImageIcon, Award,
+  MessageSquare, Navigation, WifiOff, RefreshCw, X, History
 } from "lucide-react";
 
 /* ============================= DESIGN TOKENS ============================= */
@@ -136,6 +137,156 @@ async function restRequest(path, { method = "GET", token, body, prefer } = {}) {
   }
   if (res.status === 204) return null;
   return res.json();
+}
+
+/* ============================= TECHNICIAN OFFLINE OUTBOX ============================= */
+// Technicians often work in basements/garages/rural areas with poor signal. Every write the
+// technician CRM makes goes through writeRow/patchRow below: try the network first, and if it
+// fails (or the device is already offline), the write is queued in IndexedDB instead of lost.
+// The queue is flushed automatically when the browser comes back online.
+
+const OUTBOX_DB = "lcs_tech_outbox";
+const OUTBOX_STORE = "queue";
+
+function openOutboxDB() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error("IndexedDB unavailable"));
+    const req = indexedDB.open(OUTBOX_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(OUTBOX_STORE, { keyPath: "key" });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function outboxPut(item) {
+  const db = await openOutboxDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, "readwrite");
+    tx.objectStore(OUTBOX_STORE).put(item);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function outboxDelete(key) {
+  const db = await openOutboxDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, "readwrite");
+    tx.objectStore(OUTBOX_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function outboxAll() {
+  try {
+    const db = await openOutboxDB();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(OUTBOX_STORE, "readonly");
+      const req = tx.objectStore(OUTBOX_STORE).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function queueWrite(action) {
+  try {
+    await outboxPut({ key: crypto.randomUUID(), createdAt: Date.now(), ...action });
+  } catch {
+    // IndexedDB unavailable (very old browser / private mode edge case) — the write is
+    // still reflected optimistically in local UI state, it just won't survive a reload.
+  }
+}
+
+// Insert one or more rows. Tries the network immediately; if offline or the request fails,
+// queues the insert (with an upsert Prefer header so a later retry can't create a duplicate)
+// and returns the row(s) as given so the caller can update local state optimistically.
+async function writeRow(table, row, { token, upsert = true } = {}) {
+  const prefer = upsert ? "return=representation,resolution=merge-duplicates" : "return=representation";
+  try {
+    if (!navigator.onLine) throw new Error("offline");
+    return await restRequest(table, { method: "POST", token, body: [row], prefer });
+  } catch {
+    await queueWrite({ kind: "rest", path: table, method: "POST", body: [row], token, prefer });
+    return [row];
+  }
+}
+
+// Updates rows matching a PostgREST filter query string (e.g. "id=eq.123"). PATCHes converge
+// to the same end state, so a queued retry is always safe.
+async function patchRow(table, matchQuery, patch, { token } = {}) {
+  const path = `${table}?${matchQuery}`;
+  try {
+    if (!navigator.onLine) throw new Error("offline");
+    return await restRequest(path, { method: "PATCH", token, body: patch, prefer: "return=representation" });
+  } catch {
+    await queueWrite({ kind: "rest", path, method: "PATCH", body: patch, token, prefer: "return=representation" });
+    return [patch];
+  }
+}
+
+// Uploads a photo (job-photos/<serviceRequestId>/<filename>) then inserts its attachments row.
+// Offline (or on failure), the raw file and the pending attachments row are queued together so
+// the upload and the row insert always happen as one unit when connectivity returns.
+async function uploadJobPhoto(serviceRequestId, file, attachmentRow, token) {
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${(file.type.split("/")[1] || "jpg")}`;
+  const path = `${serviceRequestId}/${filename}`;
+  try {
+    if (!navigator.onLine) throw new Error("offline");
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/job-photos/${path}`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": file.type || "image/jpeg" },
+      body: file,
+    });
+    if (!res.ok) throw new Error("Upload failed");
+    await restRequest("attachments", { method: "POST", token, body: [{ ...attachmentRow, file_url: path }], prefer: "return=representation" });
+    return path;
+  } catch {
+    await queueWrite({ kind: "photo", path, fileBlob: file, fileType: file.type || "image/jpeg", attachmentRow: { ...attachmentRow, file_url: path }, token });
+    return path;
+  }
+}
+
+async function getSignedPhotoUrl(path, token) {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/job-photos/${path}`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ expiresIn: 3600 }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.signedURL ? `${SUPABASE_URL}/storage/v1${json.signedURL}` : null;
+  } catch {
+    return null;
+  }
+}
+
+// Replays every queued write in order, stopping at the first failure (still offline, or a
+// transient error) so remaining items retry cleanly next time rather than replaying out of order.
+async function flushOutbox() {
+  const items = await outboxAll();
+  let flushed = 0;
+  for (const item of items) {
+    try {
+      if (item.kind === "photo") {
+        const res = await fetch(`${SUPABASE_URL}/storage/v1/object/job-photos/${item.path}`, {
+          method: "POST",
+          headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${item.token}`, "Content-Type": item.fileType },
+          body: item.fileBlob,
+        });
+        if (!res.ok && res.status !== 409) throw new Error("Upload failed");
+        await restRequest("attachments", { method: "POST", token: item.token, body: [item.attachmentRow], prefer: "return=representation,resolution=merge-duplicates" });
+      } else {
+        await restRequest(item.path, { method: item.method, token: item.token, body: item.body, prefer: item.prefer });
+      }
+      await outboxDelete(item.key);
+      flushed++;
+    } catch {
+      break;
+    }
+  }
+  return flushed;
 }
 
 // Maps a UI label like "As Soon As Possible" to the DB enum value "as_soon_as_possible".
@@ -1691,15 +1842,862 @@ function StaffLoginScreen({ title, onSignIn, loading, error }) {
   );
 }
 
+// ---- Quick-select vocab (exact options the technician taps instead of typing) ----
+const FINDING_TAGS = ["Electrical", "Refrigerant", "Airflow", "Thermostat", "Drain", "Capacitor", "Compressor", "Blower", "Filter", "Other"];
+const ACTION_TAGS = ["Repaired", "Replaced Part", "Cleaned", "Adjusted", "Tested", "Recommended Replacement", "No Issue Found", "Other"];
+const RECOMMENDATION_TAGS = ["Replace Filter", "Maintenance Recommended", "Repair Recommended", "Equipment Replacement Recommended", "Ductwork Evaluation", "Indoor Air Quality", "Other"];
+const OUTCOME_TAGS = ["Work Completed", "Customer Needs Follow-Up", "Estimate Recommended", "Return Visit Required"];
+const FOLLOWUP_QUICK = [{ label: "Tomorrow", days: 1 }, { label: "3 Days", days: 3 }, { label: "1 Week", days: 7 }, { label: "30 Days", days: 30 }];
+const EQUIPMENT_TYPES = ["furnace", "central_air_conditioner", "heat_pump", "mini_split", "boiler", "air_handler", "thermostat", "indoor_air_quality", "water_heater", "electrical_panel", "other"];
+const OPEN_JOB_STATUSES = ["cancelled", "completed"];
+
+function addDaysISO(days) { const d = new Date(); d.setDate(d.getDate() + days); return toISODate(d); }
+function fullAddress(p) { return p ? `${p.address_line1}${p.address_line2 ? ", " + p.address_line2 : ""}, ${p.city}, ${p.state} ${p.postal_code}` : ""; }
+function directionsUrl(p) { return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(fullAddress(p))}`; }
+function humanizeDate(iso) { if (!iso) return ""; return new Date(`${iso}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" }); }
+
+// Finds (or creates) the one service_records row a technician's visit writes into. Every quick
+// action on the job — notes, parts, recommendation, photos — shares this same record, so nothing
+// the technician enters ever needs to be typed twice.
+async function ensureServiceRecord(job, technician, token) {
+  const existing = await restRequest(
+    `service_records?service_request_id=eq.${job.id}&technician_id=eq.${technician.id}&order=created_at.desc&limit=1`,
+    { token }
+  ).catch(() => null);
+  if (existing && existing[0]) return existing[0];
+  const row = {
+    id: crypto.randomUUID(), service_request_id: job.id, customer_id: job.customer_id,
+    equipment_id: job.equipment_id || null, technician_id: technician.id,
+    service_date: toISODate(new Date()), service_type: job.category,
+    problem_reported: job.problem_description || null,
+  };
+  const [created] = await writeRow("service_records", row, { token });
+  return created || row;
+}
+
+function BtnLabel({ icon: Icon, label }) {
+  return <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, width: "100%" }}><Icon size={14} />{label}</span>;
+}
+
+function TagChips({ options, selected, onToggle }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+      {options.map((opt) => {
+        const active = selected.includes(opt);
+        return (
+          <div key={opt} onClick={() => onToggle(opt)} style={{
+            padding: "10px 14px", borderRadius: 999, cursor: "pointer",
+            fontFamily: BODY, fontWeight: 700, fontSize: 13.5,
+            background: active ? C.terracotta : "#F1EBE0", color: active ? "#fff" : C.ink,
+          }}>{opt}</div>
+        );
+      })}
+    </div>
+  );
+}
+
+function BigActionButton({ label, sub, onClick, disabled, done }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      width: "100%", textAlign: "left", cursor: disabled ? "default" : "pointer",
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      background: done ? "#E4EFDE" : "#fff", border: `1.5px solid ${done ? "#2F5D34" : C.line}`,
+      borderRadius: 14, padding: "16px 18px", fontFamily: BODY,
+    }}>
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 16, color: C.ink }}>{label}</div>
+        {sub && <div style={{ fontSize: 12.5, color: done ? "#2F5D34" : C.ash, marginTop: 2, fontWeight: 600 }}>{sub}</div>}
+      </div>
+      {!disabled && <ChevronRight size={20} color={C.ash} />}
+    </button>
+  );
+}
+
+function SyncPill({ pending, online, onSync }) {
+  if (pending === 0 && online) return null;
+  return (
+    <div onClick={onSync} style={{
+      display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+      background: !online ? "#F4E1DF" : "#F6E9CF", color: !online ? "#8C2D2D" : "#8A5A15",
+      borderRadius: 12, padding: "8px 12px", margin: "10px 18px 0", fontFamily: BODY, fontWeight: 700, fontSize: 12.5,
+    }}>
+      {!online ? <WifiOff size={15} /> : <RefreshCw size={15} />}
+      {!online ? "Offline — your changes are saved on this device" : `${pending} waiting to sync — tap to retry`}
+    </div>
+  );
+}
+
+function JobCard({ job, onOpen, onStart, onCall, onDirections }) {
+  const sc = statusColor(humanize(job.status));
+  const Icon = serviceLineIcon(job.service_lines ? job.service_lines.key : null);
+  const phone = job.customers.users?.phone;
+  return (
+    <Card onClick={() => onOpen(job)} style={{ cursor: "pointer" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 15, color: C.ink }}>
+          {job.preferred_date ? `${humanizeDate(job.preferred_date)}${job.preferred_window ? " · " + job.preferred_window : ""}` : "Unscheduled"}
+        </div>
+        <Badge color={sc.color} bg={sc.bg}>{humanize(job.status)}</Badge>
+      </div>
+      <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 17, color: C.ink, marginTop: 6 }}>{job.customers.first_name} {job.customers.last_name}</div>
+      <div style={{ fontFamily: BODY, fontSize: 13.5, color: C.ash, marginTop: 2 }}>{fullAddress(job.properties)}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10 }}>
+        <Icon size={15} color={C.terracotta} />
+        <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14, color: C.ink }}>{job.category}</div>
+      </div>
+      {job.problem_description && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginTop: 3 }}>{job.problem_description}</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ flex: 1.3 }}><PrimaryButton full onClick={() => onStart(job)}>Start Job</PrimaryButton></div>
+        <div style={{ flex: 1 }}><GhostButton full onClick={() => onCall(phone)}><BtnLabel icon={Phone} label="Call" /></GhostButton></div>
+        <div style={{ flex: 1 }}><GhostButton full onClick={() => onDirections(job.properties)}><BtnLabel icon={Navigation} label="Go" /></GhostButton></div>
+      </div>
+    </Card>
+  );
+}
+
+function JobScreen({ job, equipmentByProperty, onBack, onStart, onCall, onText, onDirections, onOpenModal, onOpenHistory }) {
+  const sc = statusColor(humanize(job.status));
+  const Icon = serviceLineIcon(job.service_lines ? job.service_lines.key : null);
+  const started = ["in_progress", "completed"].includes(job.status);
+  const equipment = equipmentByProperty[job.property_id] || [];
+  const phone = job.customers.users?.phone;
+
+  return (
+    <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
+      <AppBar title={job.request_number} onBack={onBack} />
+      <div style={{ padding: "0 18px 30px", display: "flex", flexDirection: "column", gap: 14 }}>
+        <Card>
+          <SectionLabel>Customer</SectionLabel>
+          <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 18, color: C.ink }}>{job.customers.first_name} {job.customers.last_name}</div>
+          {phone && <div style={{ fontFamily: BODY, fontSize: 14, color: C.ash, marginTop: 2 }}>{phone}</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <div style={{ flex: 1 }}><PrimaryButton full onClick={() => onCall(phone)}><BtnLabel icon={Phone} label="Call" /></PrimaryButton></div>
+            <div style={{ flex: 1 }}><GhostButton full onClick={() => onText(phone)}><BtnLabel icon={MessageSquare} label="Text" /></GhostButton></div>
+          </div>
+        </Card>
+
+        <Card>
+          <SectionLabel>Address</SectionLabel>
+          <div style={{ fontFamily: BODY, fontSize: 14.5, color: C.ink }}>{fullAddress(job.properties)}</div>
+          <div style={{ marginTop: 10 }}><GhostButton full onClick={() => onDirections(job.properties)}><BtnLabel icon={Navigation} label="Directions" /></GhostButton></div>
+        </Card>
+
+        <Card>
+          <SectionLabel>Job</SectionLabel>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Icon size={16} color={C.terracotta} />
+            <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 15 }}>{job.category}</div>
+          </div>
+          <div style={{ fontFamily: BODY, fontSize: 13.5, color: C.ash, marginTop: 6 }}>{job.problem_description}</div>
+          <div style={{ marginTop: 10 }}><Badge color={sc.color} bg={sc.bg}>{humanize(job.status)}</Badge></div>
+        </Card>
+
+        <Card>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <SectionLabel>Equipment</SectionLabel>
+            <div onClick={() => onOpenModal("addEquipment")} style={{ fontFamily: BODY, fontWeight: 700, fontSize: 12.5, color: C.terracotta, cursor: "pointer" }}>+ Add Equipment</div>
+          </div>
+          {equipment.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No equipment on file for this address yet.</div>}
+          {equipment.map((eq) => (
+            <div key={eq.id} onClick={() => onOpenModal("editEquipment", eq)} style={{ cursor: "pointer", padding: "10px 0", borderTop: `1px solid ${C.line}` }}>
+              <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14, color: C.ink }}>{eq.manufacturer} {humanize(eq.equipment_type)}</div>
+              <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>
+                {eq.install_date ? new Date(eq.install_date).getFullYear() : "Install year unknown"}
+                {eq.model_number ? ` · Model ${eq.model_number}` : ""}{eq.serial_number ? ` · Serial ${eq.serial_number}` : ""}
+              </div>
+              <div style={{ marginTop: 4 }}>
+                <Badge color={eq.warranty_status === "active" ? "#2F5D34" : eq.warranty_status === "expired" ? "#8C2D2D" : C.steel}
+                       bg={eq.warranty_status === "active" ? "#E4EFDE" : eq.warranty_status === "expired" ? "#F4E1DF" : "#E4EDF2"}>
+                  Warranty {humanize(eq.warranty_status)}{eq.warranty_expiration ? ` · exp ${eq.warranty_expiration}` : ""}
+                </Badge>
+              </div>
+            </div>
+          ))}
+        </Card>
+
+        <div>
+          <SectionLabel>Actions</SectionLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <BigActionButton label={started ? "✅ Job Started" : "🔧 Start Job"} sub={started ? "Work is in progress" : "Tap to begin this job"} onClick={() => !started && onStart(job)} disabled={started} done={started} />
+            <BigActionButton label="📸 Add Photos" sub="Camera or gallery" onClick={() => onOpenModal("photos")} />
+            <BigActionButton label="📝 Service Notes" sub="What you found & did" onClick={() => onOpenModal("notes")} />
+            <BigActionButton label="🔩 Parts Used" sub="Track parts for this job" onClick={() => onOpenModal("parts")} />
+            <BigActionButton label="💡 Recommendation" sub="Suggest next steps" onClick={() => onOpenModal("recommendation")} />
+            <BigActionButton label="💰 Create Estimate" sub="Send pricing to the customer" onClick={() => onOpenModal("estimate")} />
+            <BigActionButton label="📅 Follow-Up" sub="Schedule a reminder" onClick={() => onOpenModal("followup")} />
+            <BigActionButton label="📖 Customer History" sub="Past service at this address" onClick={() => onOpenHistory(job.customer_id, `${job.customers.first_name} ${job.customers.last_name}`)} />
+          </div>
+        </div>
+
+        <div style={{ marginTop: 4 }}><PrimaryButton full onClick={() => onOpenModal("complete")}>✅ Complete Job</PrimaryButton></div>
+      </div>
+    </div>
+  );
+}
+
+function ServiceNotesModal({ job, technician, session, ensureRecord, onClose, onSaved }) {
+  const [find, setFind] = useState([]);
+  const [did, setDid] = useState([]);
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const toggle = (list, set, val) => set(list.includes(val) ? list.filter((v) => v !== val) : [...list, val]);
+
+  const save = async () => {
+    setSaving(true); setError(null);
+    try {
+      const record = await ensureRecord(job);
+      await patchRow("service_records", `id=eq.${record.id}`, {
+        diagnosis: find.join(", ") || null,
+        work_performed: [did.join(", "), notes.trim() && `Notes: ${notes.trim()}`].filter(Boolean).join("\n\n") || null,
+      }, { token: session.access_token });
+      onSaved(); onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal onClose={onClose} maxWidth={440}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Service Notes</div>
+      <SectionLabel>What did you find?</SectionLabel>
+      <TagChips options={FINDING_TAGS} selected={find} onToggle={(v) => toggle(find, setFind, v)} />
+      <div style={{ height: 16 }} />
+      <SectionLabel>What did you do?</SectionLabel>
+      <TagChips options={ACTION_TAGS} selected={did} onToggle={(v) => toggle(did, setDid, v)} />
+      <div style={{ height: 16 }} />
+      <SectionLabel>Additional Notes (optional)</SectionLabel>
+      <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Tap the mic on your keyboard to dictate…"
+        style={{ width: "100%", fontFamily: BODY, fontSize: 14, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, resize: "none" }} />
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Save Notes"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function PartsModal({ job, session, ensureRecord, onClose }) {
+  const [parts, setParts] = useState([]);
+  const [name, setName] = useState("");
+  const [qty, setQty] = useState(1);
+  const [recordId, setRecordId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const record = await ensureRecord(job);
+        setRecordId(record.id);
+        const rows = await restRequest(`service_record_line_items?service_record_id=eq.${record.id}&line_type=eq.part&order=created_at.asc`, { token: session.access_token }).catch(() => []);
+        setParts(rows || []);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const addPart = async () => {
+    if (!name.trim() || !recordId) return;
+    setSaving(true); setError(null);
+    try {
+      const row = { id: crypto.randomUUID(), service_record_id: recordId, line_type: "part", description: name.trim(), quantity: qty };
+      const [created] = await writeRow("service_record_line_items", row, { token: session.access_token });
+      setParts((p) => [...p, created || row]);
+      setName(""); setQty(1);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removePart = async (id) => {
+    setParts((p) => p.filter((x) => x.id !== id));
+    try { await restRequest(`service_record_line_items?id=eq.${id}`, { method: "DELETE", token: session.access_token }); } catch { /* removed locally; will still exist server-side until next connected edit */ }
+  };
+
+  return (
+    <Modal onClose={onClose} maxWidth={420}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Parts Used</div>
+      {loading ? <div style={{ fontFamily: BODY, color: C.ash }}>Loading…</div> : (
+        <>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+            {parts.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No parts added yet.</div>}
+            {parts.map((p) => (
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#F8F5EF", borderRadius: 10, padding: "8px 12px" }}>
+                <div style={{ fontFamily: BODY, fontSize: 14, color: C.ink }}>{p.quantity}× {p.description}</div>
+                <X size={16} color={C.ash} style={{ cursor: "pointer" }} onClick={() => removePart(p.id)} />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Part name" style={{ flex: 1, fontFamily: BODY, padding: 12, borderRadius: 10, border: `1.5px solid ${C.line}` }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 6, border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "0 6px" }}>
+              <Minus size={16} style={{ cursor: "pointer" }} onClick={() => setQty((q) => Math.max(1, q - 1))} />
+              <div style={{ width: 20, textAlign: "center", fontFamily: BODY, fontWeight: 700 }}>{qty}</div>
+              <Plus size={16} style={{ cursor: "pointer" }} onClick={() => setQty((q) => q + 1)} />
+            </div>
+          </div>
+          {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+          <div style={{ marginTop: 14 }}><PrimaryButton full disabled={saving} onClick={addPart}>{saving ? "Adding…" : "+ Add Part"}</PrimaryButton></div>
+          <div style={{ marginTop: 8 }}><GhostButton full onClick={onClose}>Done</GhostButton></div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function RecommendationModal({ job, session, ensureRecord, onClose, onSaved }) {
+  const [tags, setTags] = useState([]);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const toggle = (v) => setTags((t) => (t.includes(v) ? t.filter((x) => x !== v) : [...t, v]));
+  const save = async () => {
+    setSaving(true); setError(null);
+    try {
+      const record = await ensureRecord(job);
+      await patchRow("service_records", `id=eq.${record.id}`, {
+        recommendations: [tags.join(", "), note.trim()].filter(Boolean).join(" — ") || null,
+      }, { token: session.access_token });
+      onSaved(); onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={440}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Add Recommendation</div>
+      <TagChips options={RECOMMENDATION_TAGS} selected={tags} onToggle={toggle} />
+      <div style={{ height: 16 }} />
+      <SectionLabel>Note (optional)</SectionLabel>
+      <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} style={{ width: "100%", fontFamily: BODY, fontSize: 14, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, resize: "none" }} />
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Save Recommendation"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function EstimateModal({ job, session, onClose, onSaved }) {
+  const [description, setDescription] = useState(`${job.category} — recommended service`);
+  const [price, setPrice] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 15 };
+  const save = async () => {
+    const amount = parseFloat(price);
+    if (!description.trim() || isNaN(amount) || amount <= 0) { setError("Enter a description and a price greater than $0."); return; }
+    setSaving(true); setError(null);
+    try {
+      const estimateId = crypto.randomUUID();
+      await writeRow("estimates", {
+        id: estimateId, estimate_number: `EST-${job.request_number}-${Date.now().toString(36).slice(-4).toUpperCase()}`,
+        customer_id: job.customer_id, service_request_id: job.id, description: description.trim(),
+        subtotal: amount, discount_amount: 0, tax_amount: 0, total: amount, status: "sent", notes: notes.trim() || null,
+      }, { token: session.access_token });
+      await writeRow("estimate_items", {
+        id: crypto.randomUUID(), estimate_id: estimateId, description: description.trim(), quantity: 1, unit_price: amount,
+      }, { token: session.access_token });
+      onSaved(); onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={440}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Create Estimate</div>
+      <SectionLabel>Recommended Service</SectionLabel>
+      <input style={inputStyle} value={description} onChange={(e) => setDescription(e.target.value)} />
+      <div style={{ height: 14 }} />
+      <SectionLabel>Price</SectionLabel>
+      <input style={inputStyle} type="number" inputMode="decimal" placeholder="$0.00" value={price} onChange={(e) => setPrice(e.target.value)} />
+      <div style={{ height: 14 }} />
+      <SectionLabel>Notes (optional)</SectionLabel>
+      <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} style={{ ...inputStyle, resize: "none" }} />
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Save Estimate"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function FollowUpModal({ job, session, onClose, onSaved }) {
+  const [days, setDays] = useState(3);
+  const [customDate, setCustomDate] = useState("");
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const save = async () => {
+    setSaving(true); setError(null);
+    try {
+      await writeRow("reminders", {
+        id: crypto.randomUUID(), customer_id: job.customer_id, equipment_id: job.equipment_id || null,
+        reminder_type: "service_follow_up",
+        message: note.trim() || `Follow up: ${job.category} — ${job.customers.first_name} ${job.customers.last_name}`,
+        due_date: customDate || addDaysISO(days), status: "upcoming",
+      }, { token: session.access_token });
+      onSaved(); onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={420}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Follow-Up</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {FOLLOWUP_QUICK.map((o) => (
+          <div key={o.label} onClick={() => { setDays(o.days); setCustomDate(""); }} style={{
+            padding: "12px 16px", borderRadius: 12, cursor: "pointer", fontFamily: BODY, fontWeight: 700, fontSize: 14,
+            background: !customDate && days === o.days ? C.terracotta : "#F1EBE0", color: !customDate && days === o.days ? "#fff" : C.ink,
+          }}>{o.label}</div>
+        ))}
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <SectionLabel>Or pick a date</SectionLabel>
+        <input type="date" value={customDate} onChange={(e) => setCustomDate(e.target.value)} style={{ width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}` }} />
+      </div>
+      <div style={{ marginTop: 14 }}>
+        <SectionLabel>Note (optional)</SectionLabel>
+        <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} style={{ width: "100%", fontFamily: BODY, fontSize: 14, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, resize: "none" }} />
+      </div>
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Save Follow-Up"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function PhotosModal({ job, session, ensureRecord, onClose }) {
+  const [record, setRecord] = useState(null);
+  const [photos, setPhotos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const rec = await ensureRecord(job);
+        setRecord(rec);
+        const rows = await restRequest(`attachments?related_entity_type=eq.service_record&related_entity_id=eq.${rec.id}&order=created_at.desc`, { token: session.access_token }).catch(() => []);
+        const withUrls = await Promise.all((rows || []).map(async (r) => ({ id: r.id, url: await getSignedPhotoUrl(r.file_url, session.access_token), pending: false })));
+        setPhotos(withUrls);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const handleFiles = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length || !record) return;
+    setUploading(true);
+    for (const file of files) {
+      const localId = crypto.randomUUID();
+      setPhotos((p) => [{ id: localId, url: URL.createObjectURL(file), pending: true }, ...p]);
+      const attachmentRow = {
+        id: crypto.randomUUID(), uploaded_by_user_id: session.user.id,
+        related_entity_type: "service_record", related_entity_id: record.id, file_type: file.type || "image/jpeg",
+      };
+      await uploadJobPhoto(job.id, file, attachmentRow, session.access_token);
+      setPhotos((p) => p.map((ph) => (ph.id === localId ? { ...ph, pending: !navigator.onLine } : ph)));
+    }
+    setUploading(false);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  return (
+    <Modal onClose={onClose} maxWidth={440}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Photos</div>
+      {loading ? <div style={{ fontFamily: BODY, color: C.ash }}>Loading…</div> : (
+        <>
+          <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple onChange={handleFiles} style={{ display: "none" }} />
+          <PrimaryButton full onClick={() => fileRef.current?.click()}>{uploading ? "Uploading…" : "📸 Take / Add Photo"}</PrimaryButton>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 14 }}>
+            {photos.map((p) => (
+              <div key={p.id} style={{ position: "relative", aspectRatio: "1", borderRadius: 10, overflow: "hidden", background: "#F1EBE0" }}>
+                {p.url && <img src={p.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
+                {p.pending && (
+                  <div style={{ position: "absolute", bottom: 4, left: 4, right: 4, background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 9.5, fontFamily: BODY, fontWeight: 700, borderRadius: 6, padding: "2px 5px", textAlign: "center" }}>
+                    Waiting to sync
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          {photos.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginTop: 12 }}>No photos yet.</div>}
+          <div style={{ marginTop: 16 }}><GhostButton full onClick={onClose}>Done</GhostButton></div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function CompleteJobModal({ job, session, onClose, onCompleted }) {
+  const [outcome, setOutcome] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const save = async () => {
+    if (!outcome) { setError("Select what happened with this job."); return; }
+    setSaving(true); setError(null);
+    try {
+      const [updated] = await patchRow("service_requests", `id=eq.${job.id}`, {
+        status: "completed", internal_notes: `Visit outcome: ${outcome}`,
+      }, { token: session.access_token });
+      onCompleted({ ...job, ...updated, status: "completed" });
+      onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={420}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 6 }}>Complete Job</div>
+      <div style={{ fontFamily: BODY, fontSize: 14, color: C.ash, marginBottom: 14 }}>What happened with this job?</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {OUTCOME_TAGS.map((o) => (
+          <div key={o} onClick={() => setOutcome(o)} style={{
+            padding: "14px 16px", borderRadius: 12, cursor: "pointer", fontFamily: BODY, fontWeight: 700, fontSize: 14.5,
+            background: outcome === o ? C.terracotta : "#F1EBE0", color: outcome === o ? "#fff" : C.ink,
+          }}>{o}</div>
+        ))}
+      </div>
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Completing…" : "✅ Complete Job"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function EquipmentFormModal({ job, existing, session, onClose, onSaved }) {
+  const [type, setType] = useState(existing?.equipment_type || "furnace");
+  const [manufacturer, setManufacturer] = useState(existing?.manufacturer || "");
+  const [model, setModel] = useState(existing?.model_number || "");
+  const [serial, setSerial] = useState(existing?.serial_number || "");
+  const [year, setYear] = useState(existing?.install_date ? new Date(existing.install_date).getFullYear() : "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 15 };
+  const save = async () => {
+    setSaving(true); setError(null);
+    try {
+      const row = {
+        equipment_type: type, manufacturer: manufacturer.trim() || null, model_number: model.trim() || null,
+        serial_number: serial.trim() || null, install_date: year ? `${year}-01-01` : null,
+      };
+      if (existing) {
+        await patchRow("equipment", `id=eq.${existing.id}`, row, { token: session.access_token });
+      } else {
+        await writeRow("equipment", { id: crypto.randomUUID(), property_id: job.property_id, ...row }, { token: session.access_token });
+      }
+      onSaved(); onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={420}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>{existing ? "Edit Equipment" : "Add Equipment"}</div>
+      <SectionLabel>Equipment Type</SectionLabel>
+      <select value={type} onChange={(e) => setType(e.target.value)} style={inputStyle}>
+        {EQUIPMENT_TYPES.map((t) => <option key={t} value={t}>{humanize(t)}</option>)}
+      </select>
+      <div style={{ height: 12 }} />
+      <SectionLabel>Manufacturer</SectionLabel>
+      <input style={inputStyle} value={manufacturer} onChange={(e) => setManufacturer(e.target.value)} placeholder="e.g. Carrier" />
+      <div style={{ height: 12 }} />
+      <SectionLabel>Model</SectionLabel>
+      <input style={inputStyle} value={model} onChange={(e) => setModel(e.target.value)} />
+      <div style={{ height: 12 }} />
+      <SectionLabel>Serial Number</SectionLabel>
+      <input style={inputStyle} value={serial} onChange={(e) => setSerial(e.target.value)} />
+      <div style={{ height: 12 }} />
+      <SectionLabel>Installation Year</SectionLabel>
+      <input style={inputStyle} type="number" inputMode="numeric" placeholder="e.g. 2019" value={year} onChange={(e) => setYear(e.target.value)} />
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Save Equipment"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function CustomerHistoryScreen({ customerId, customerName, session, onBack }) {
+  const [history, setHistory] = useState(null);
+  const [openId, setOpenId] = useState(null);
+  useEffect(() => {
+    restRequest(`service_records?select=*,technicians(first_name,last_name)&customer_id=eq.${customerId}&order=service_date.desc`, { token: session.access_token })
+      .then(setHistory).catch(() => setHistory([]));
+  }, [customerId]);
+  return (
+    <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
+      <AppBar title="Customer History" onBack={onBack} />
+      <div style={{ padding: "0 18px 30px" }}>
+        <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 15, color: C.ink, marginBottom: 12 }}>{customerName}</div>
+        {history === null && <div style={{ fontFamily: BODY, color: C.ash }}>Loading…</div>}
+        {history && history.length === 0 && <div style={{ fontFamily: BODY, color: C.ash }}>No past service on file yet.</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {(history || []).map((r) => (
+            <Card key={r.id} onClick={() => setOpenId(openId === r.id ? null : r.id)} style={{ cursor: "pointer" }}>
+              <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14.5, color: C.ink }}>{humanizeDate(r.service_date)} — {r.service_type}</div>
+              <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 3 }}>
+                Technician: {r.technicians ? `${r.technicians.first_name} ${r.technicians.last_name}` : "—"}
+              </div>
+              {openId === r.id && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}`, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {r.diagnosis && <div style={{ fontFamily: BODY, fontSize: 13 }}><b>Found:</b> {r.diagnosis}</div>}
+                  {r.work_performed && <div style={{ fontFamily: BODY, fontSize: 13, whiteSpace: "pre-wrap" }}><b>Did:</b> {r.work_performed}</div>}
+                  {r.recommendations && <div style={{ fontFamily: BODY, fontSize: 13 }}><b>Recommended:</b> {r.recommendations}</div>}
+                </div>
+              )}
+            </Card>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CustomersScreen({ customers, onOpen }) {
+  const [q, setQ] = useState("");
+  const query = q.toLowerCase();
+  const filtered = customers.filter((c) => `${c.first_name} ${c.last_name} ${c.users?.phone || ""} ${(c.properties || []).map(fullAddress).join(" ")}`.toLowerCase().includes(query));
+  return (
+    <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
+      <AppBar title="My Customers" />
+      <div style={{ padding: "0 18px 30px" }}>
+        <div style={{ position: "relative", marginBottom: 14 }}>
+          <Search size={16} color={C.ash} style={{ position: "absolute", left: 12, top: 14 }} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, phone, address…"
+            style={{ width: "100%", fontFamily: BODY, padding: "12px 12px 12px 36px", borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 14 }} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {filtered.map((c) => (
+            <Card key={c.id} onClick={() => onOpen(c)} style={{ cursor: "pointer" }}>
+              <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 15, color: C.ink }}>{c.first_name} {c.last_name}</div>
+              <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 2 }}>{c.users?.phone}</div>
+              {c.properties?.[0] && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>{fullAddress(c.properties[0])}</div>}
+            </Card>
+          ))}
+          {filtered.length === 0 && <div style={{ fontFamily: BODY, color: C.ash, fontSize: 13 }}>No customers found.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CustomerDetailScreen({ customer, jobs, equipmentByProperty, onBack, onOpenJob, onOpenHistory, onCall, onDirections }) {
+  const myJobs = jobs.filter((j) => j.customer_id === customer.id);
+  const openJobs = myJobs.filter((j) => !OPEN_JOB_STATUSES.includes(j.status));
+  const upcoming = openJobs.filter((j) => j.preferred_date && j.preferred_date > toISODate(new Date()));
+  const equipment = (customer.properties || []).flatMap((p) => equipmentByProperty[p.id] || []);
+  return (
+    <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
+      <AppBar title={`${customer.first_name} ${customer.last_name}`} onBack={onBack} />
+      <div style={{ padding: "0 18px 30px", display: "flex", flexDirection: "column", gap: 14 }}>
+        <Card>
+          <SectionLabel>Contact</SectionLabel>
+          <div style={{ fontFamily: BODY, fontSize: 14.5, color: C.ink }}>{customer.users?.phone}</div>
+          <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{customer.users?.email}</div>
+          <div style={{ marginTop: 10 }}><PrimaryButton full onClick={() => onCall(customer.users?.phone)}><BtnLabel icon={Phone} label="Call" /></PrimaryButton></div>
+        </Card>
+        <Card>
+          <SectionLabel>Address</SectionLabel>
+          {(customer.properties || []).map((p) => (
+            <div key={p.id} style={{ marginBottom: 8 }}>
+              <div style={{ fontFamily: BODY, fontSize: 14 }}>{fullAddress(p)}</div>
+              <div style={{ marginTop: 4 }}><GhostButton onClick={() => onDirections(p)}><BtnLabel icon={Navigation} label="Directions" /></GhostButton></div>
+            </div>
+          ))}
+        </Card>
+        <Card>
+          <SectionLabel>Equipment</SectionLabel>
+          {equipment.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>None on file.</div>}
+          {equipment.map((eq) => (
+            <div key={eq.id} style={{ padding: "8px 0", borderTop: `1px solid ${C.line}`, fontFamily: BODY, fontSize: 13.5, color: C.ink }}>
+              {eq.manufacturer} {humanize(eq.equipment_type)}{eq.model_number ? ` · ${eq.model_number}` : ""}
+            </div>
+          ))}
+        </Card>
+        {upcoming.length > 0 && (
+          <Card>
+            <SectionLabel>Upcoming</SectionLabel>
+            {upcoming.map((j) => <div key={j.id} style={{ fontFamily: BODY, fontSize: 13.5, padding: "6px 0", color: C.ink }}>{humanizeDate(j.preferred_date)} — {j.category}</div>)}
+          </Card>
+        )}
+        <Card>
+          <SectionLabel>Current / Open Jobs</SectionLabel>
+          {openJobs.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No open jobs.</div>}
+          {openJobs.map((j) => {
+            const sc = statusColor(humanize(j.status));
+            return (
+              <div key={j.id} onClick={() => onOpenJob(j)} style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: `1px solid ${C.line}` }}>
+                <div style={{ fontFamily: BODY, fontSize: 13.5, color: C.ink }}>{j.request_number} · {j.category}</div>
+                <Badge color={sc.color} bg={sc.bg}>{humanize(j.status)}</Badge>
+              </div>
+            );
+          })}
+        </Card>
+        <GhostButton full onClick={() => onOpenHistory(customer.id, `${customer.first_name} ${customer.last_name}`)}><BtnLabel icon={History} label="View Full History" /></GhostButton>
+      </div>
+    </div>
+  );
+}
+
+function SearchScreen({ customers, jobs, onOpenCustomer, onOpenJob }) {
+  const [q, setQ] = useState("");
+  const query = q.trim().toLowerCase();
+  const matchedJobs = query ? jobs.filter((j) => `${j.request_number} ${j.customers.first_name} ${j.customers.last_name} ${fullAddress(j.properties)}`.toLowerCase().includes(query)) : [];
+  const matchedCustomers = query ? customers.filter((c) => `${c.first_name} ${c.last_name} ${c.users?.phone || ""} ${(c.properties || []).map(fullAddress).join(" ")}`.toLowerCase().includes(query)) : [];
+  return (
+    <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
+      <AppBar title="Search" />
+      <div style={{ padding: "0 18px 30px" }}>
+        <div style={{ position: "relative", marginBottom: 16 }}>
+          <Search size={16} color={C.ash} style={{ position: "absolute", left: 12, top: 14 }} />
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Customer, phone, address, job #…"
+            style={{ width: "100%", fontFamily: BODY, padding: "12px 12px 12px 36px", borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 14 }} />
+        </div>
+        {!query && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>Start typing to search your customers and jobs.</div>}
+        {query && matchedJobs.length > 0 && (
+          <>
+            <SectionLabel>Jobs</SectionLabel>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+              {matchedJobs.map((j) => (
+                <Card key={j.id} onClick={() => onOpenJob(j)} style={{ cursor: "pointer" }}>
+                  <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14 }}>{j.request_number} · {j.category}</div>
+                  <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>{j.customers.first_name} {j.customers.last_name} · {fullAddress(j.properties)}</div>
+                </Card>
+              ))}
+            </div>
+          </>
+        )}
+        {query && matchedCustomers.length > 0 && (
+          <>
+            <SectionLabel>Customers</SectionLabel>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {matchedCustomers.map((c) => (
+                <Card key={c.id} onClick={() => onOpenCustomer(c)} style={{ cursor: "pointer" }}>
+                  <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14 }}>{c.first_name} {c.last_name}</div>
+                  <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>{c.users?.phone}</div>
+                </Card>
+              ))}
+            </div>
+          </>
+        )}
+        {query && matchedCustomers.length === 0 && matchedJobs.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No matches.</div>}
+      </div>
+    </div>
+  );
+}
+
+function FollowUpsScreen({ reminders, customers }) {
+  const sorted = [...reminders].sort((a, b) => a.due_date.localeCompare(b.due_date));
+  const nameFor = (customerId) => { const c = customers.find((c) => c.id === customerId); return c ? `${c.first_name} ${c.last_name}` : "Customer"; };
+  return (
+    <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
+      <AppBar title="Follow-Ups" />
+      <div style={{ padding: "0 18px 30px", display: "flex", flexDirection: "column", gap: 10 }}>
+        {sorted.length === 0 && <div style={{ fontFamily: BODY, color: C.ash, fontSize: 13 }}>No follow-ups scheduled.</div>}
+        {sorted.map((r) => {
+          const sc = statusColor(humanize(r.status));
+          return (
+            <Card key={r.id}>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14 }}>{nameFor(r.customer_id)}</div>
+                <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>
+              </div>
+              <div style={{ fontFamily: BODY, fontSize: 13, color: C.ink, marginTop: 4 }}>{r.message}</div>
+              <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash, marginTop: 4 }}>Due {humanizeDate(r.due_date)}</div>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const TECH_TABS = [
+  { key: "jobs", label: "Jobs", icon: Wrench },
+  { key: "customers", label: "Customers", icon: Users },
+  { key: "search", label: "Search", icon: Search },
+  { key: "followups", label: "Follow-Ups", icon: Bell },
+];
+
 function TechnicianApp() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState(null);
   const [dataLoading, setDataLoading] = useState(false);
   const [technician, setTechnician] = useState(null);
+
   const [jobs, setJobs] = useState([]);
-  const [openJob, setOpenJob] = useState(null);
-  const [noteDraft, setNoteDraft] = useState("");
+  const [customers, setCustomers] = useState([]);
+  const [equipmentByProperty, setEquipmentByProperty] = useState({});
+  const [reminders, setReminders] = useState([]);
+
+  const [tab, setTab] = useState("jobs");
+  const [openJobId, setOpenJobId] = useState(null);
+  const [openCustomerId, setOpenCustomerId] = useState(null);
+  const [historyFor, setHistoryFor] = useState(null);
+  const [modal, setModal] = useState(null);
+
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pending, setPending] = useState(0);
+  const serviceRecordCache = useRef({});
+
+  const refreshPending = () => outboxAll().then((l) => setPending(l.length));
+
+  useEffect(() => {
+    const goOnline = () => { setOnline(true); flushOutbox().then(refreshPending); };
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    refreshPending();
+    const interval = setInterval(() => { if (navigator.onLine) flushOutbox().then(refreshPending); }, 45000);
+    return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); clearInterval(interval); };
+  }, []);
+
+  const loadAll = async (token, technicianId) => {
+    setDataLoading(true);
+    try {
+      const [jobRows, customerRows, equipmentRows, reminderRows] = await Promise.all([
+        restRequest(`service_requests?select=*,customers(id,first_name,last_name,user_id,users(phone,email)),properties(id,address_line1,address_line2,city,state,postal_code),service_lines(key,label)&assigned_technician_id=eq.${technicianId}&order=preferred_date.asc`, { token }),
+        restRequest(`customers?select=id,first_name,last_name,user_id,users(phone,email),properties(id,address_line1,address_line2,city,state,postal_code)&order=first_name.asc`, { token }),
+        restRequest(`equipment?select=*&order=created_at.desc`, { token }),
+        restRequest(`reminders?select=*&order=due_date.asc`, { token }),
+      ]);
+      setJobs(jobRows || []);
+      setCustomers(customerRows || []);
+      const grouped = {};
+      (equipmentRows || []).forEach((eq) => { (grouped[eq.property_id] ||= []).push(eq); });
+      setEquipmentByProperty(grouped);
+      setReminders(reminderRows || []);
+    } finally {
+      setDataLoading(false);
+    }
+  };
+
+  const refreshEquipment = async () => {
+    const rows = await restRequest(`equipment?select=*&order=created_at.desc`, { token: session.access_token }).catch(() => null);
+    if (!rows) return;
+    const grouped = {};
+    rows.forEach((eq) => { (grouped[eq.property_id] ||= []).push(eq); });
+    setEquipmentByProperty(grouped);
+  };
+  const refreshReminders = async () => {
+    const rows = await restRequest(`reminders?select=*&order=due_date.asc`, { token: session.access_token }).catch(() => null);
+    if (rows) setReminders(rows);
+  };
 
   const handleSignIn = async (email, password) => {
     setAuthLoading(true); setAuthError(null);
@@ -1709,7 +2707,7 @@ function TechnicianApp() {
       if (!techRows[0]) throw new Error("This account is not registered as a technician.");
       setSession({ access_token: res.access_token, user: res.user });
       setTechnician(techRows[0]);
-      await loadJobs(res.access_token, techRows[0].id);
+      await loadAll(res.access_token, techRows[0].id);
     } catch (e) {
       setAuthError(e.message);
     } finally {
@@ -1717,99 +2715,123 @@ function TechnicianApp() {
     }
   };
 
-  const loadJobs = async (token, technicianId) => {
-    setDataLoading(true);
-    try {
-      const rows = await restRequest(
-        `service_requests?select=*,customers(first_name,last_name,phone),properties(address_line1,city,state,postal_code),service_lines(key,label)&assigned_technician_id=eq.${technicianId}&order=created_at.desc`,
-        { token }
-      );
-      setJobs(rows);
-    } finally {
-      setDataLoading(false);
-    }
+  const getRecord = async (job) => {
+    if (serviceRecordCache.current[job.id]) return serviceRecordCache.current[job.id];
+    const rec = await ensureServiceRecord(job, technician, session.access_token);
+    serviceRecordCache.current[job.id] = rec;
+    return rec;
   };
 
-  const advance = async (job) => {
-    const flow = ["submitted", "received", "reviewing", "appointment_scheduled", "technician_assigned", "technician_en_route", "in_progress", "completed"];
-    const i = flow.indexOf(job.status);
-    const nextStatus = flow[Math.min(i + 1, flow.length - 1)];
-    const body = { status: nextStatus, internal_notes: noteDraft || job.internal_notes };
-    const [updated] = await restRequest(`service_requests?id=eq.${job.id}`, { method: "PATCH", token: session.access_token, body, prefer: "return=representation" });
-    const merged = { ...job, ...updated };
-    setJobs((js) => js.map((j) => (j.id === job.id ? merged : j)));
-    setOpenJob(merged);
-    if (nextStatus === "completed") {
-      await restRequest("service_records", {
-        method: "POST", token: session.access_token,
-        body: [{
-          service_request_id: job.id, customer_id: job.customer_id, technician_id: technician.id,
-          service_date: toISODate(new Date()), service_type: job.category,
-          problem_reported: job.problem_description, work_performed: noteDraft || null,
-        }],
-      });
-    }
+  const startJob = async (job) => {
+    if (["in_progress", "completed"].includes(job.status)) return;
+    const [updated] = await patchRow("service_requests", `id=eq.${job.id}`, { status: "in_progress" }, { token: session.access_token });
+    setJobs((js) => js.map((j) => (j.id === job.id ? { ...j, ...updated, status: "in_progress" } : j)));
+    getRecord(job).catch(() => {});
+    refreshPending();
   };
 
-  const logOut = () => { setSession(null); setTechnician(null); setJobs([]); setOpenJob(null); };
+  const call = (phone) => { if (phone) window.location.href = `tel:${phone}`; };
+  const text = (phone) => { if (phone) window.location.href = `sms:${phone}`; };
+  const directions = (property) => { window.open(directionsUrl(property), "_blank"); };
+  const openJob = (job) => setOpenJobId(job.id);
+
+  const logOut = () => {
+    setSession(null); setTechnician(null); setJobs([]); setCustomers([]); setEquipmentByProperty({}); setReminders([]);
+    setOpenJobId(null); setOpenCustomerId(null); setHistoryFor(null); setModal(null); setTab("jobs");
+  };
 
   if (!session) return <StaffLoginScreen title="Technician Login" onSignIn={handleSignIn} loading={authLoading} error={authError} />;
+  if (dataLoading || !technician) {
+    return <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: C.cream }}><div style={{ fontFamily: BODY, color: C.ash }}>Loading your jobs…</div></div>;
+  }
 
-  if (openJob) {
-    const job = jobs.find((j) => j.id === openJob.id) || openJob;
-    const sc = statusColor(humanize(job.status));
-    const Icon = serviceLineIcon(job.service_lines ? job.service_lines.key : null);
-    return (
+  const currentJob = jobs.find((j) => j.id === openJobId) || null;
+  const currentCustomer = customers.find((c) => c.id === openCustomerId) || null;
+
+  let body, modalsHost = null;
+  if (historyFor) {
+    body = <CustomerHistoryScreen customerId={historyFor.customerId} customerName={historyFor.name} session={session} onBack={() => setHistoryFor(null)} />;
+  } else if (openCustomerId && currentCustomer) {
+    body = (
+      <CustomerDetailScreen
+        customer={currentCustomer} jobs={jobs} equipmentByProperty={equipmentByProperty}
+        onBack={() => setOpenCustomerId(null)}
+        onOpenJob={(j) => { setOpenCustomerId(null); setOpenJobId(j.id); }}
+        onOpenHistory={(customerId, name) => setHistoryFor({ customerId, name })}
+        onCall={call} onDirections={directions}
+      />
+    );
+  } else if (openJobId && currentJob) {
+    body = (
+      <JobScreen
+        job={currentJob} equipmentByProperty={equipmentByProperty}
+        onBack={() => setOpenJobId(null)} onStart={startJob} onCall={call} onText={text} onDirections={directions}
+        onOpenModal={(type, data) => setModal({ type, data })}
+        onOpenHistory={(customerId, name) => setHistoryFor({ customerId, name })}
+      />
+    );
+    modalsHost = (
+      <>
+        {modal?.type === "notes" && <ServiceNotesModal job={currentJob} technician={technician} session={session} ensureRecord={getRecord} onClose={() => setModal(null)} onSaved={refreshPending} />}
+        {modal?.type === "parts" && <PartsModal job={currentJob} session={session} ensureRecord={getRecord} onClose={() => setModal(null)} />}
+        {modal?.type === "recommendation" && <RecommendationModal job={currentJob} session={session} ensureRecord={getRecord} onClose={() => setModal(null)} onSaved={refreshPending} />}
+        {modal?.type === "photos" && <PhotosModal job={currentJob} session={session} ensureRecord={getRecord} onClose={() => setModal(null)} />}
+        {modal?.type === "estimate" && <EstimateModal job={currentJob} session={session} onClose={() => setModal(null)} onSaved={refreshPending} />}
+        {modal?.type === "followup" && <FollowUpModal job={currentJob} session={session} onClose={() => setModal(null)} onSaved={() => { refreshReminders(); refreshPending(); }} />}
+        {modal?.type === "complete" && (
+          <CompleteJobModal job={currentJob} session={session} onClose={() => setModal(null)} onCompleted={(updated) => { setJobs((js) => js.map((j) => (j.id === updated.id ? { ...j, ...updated } : j))); setOpenJobId(null); }} />
+        )}
+        {(modal?.type === "addEquipment" || modal?.type === "editEquipment") && (
+          <EquipmentFormModal job={currentJob} existing={modal.data || null} session={session} onClose={() => setModal(null)} onSaved={() => { refreshEquipment(); refreshPending(); }} />
+        )}
+      </>
+    );
+  } else if (tab === "customers") {
+    body = <CustomersScreen customers={customers} onOpen={(c) => setOpenCustomerId(c.id)} />;
+  } else if (tab === "search") {
+    body = <SearchScreen customers={customers} jobs={jobs} onOpenCustomer={(c) => setOpenCustomerId(c.id)} onOpenJob={openJob} />;
+  } else if (tab === "followups") {
+    body = <FollowUpsScreen reminders={reminders} customers={customers} />;
+  } else {
+    const todayStr = toISODate(new Date());
+    const open = jobs.filter((j) => !OPEN_JOB_STATUSES.includes(j.status));
+    const todays = open.filter((j) => !j.preferred_date || j.preferred_date <= todayStr);
+    const upcoming = open.filter((j) => j.preferred_date && j.preferred_date > todayStr).sort((a, b) => a.preferred_date.localeCompare(b.preferred_date));
+    body = (
       <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
-        <AppBar title={job.request_number} onBack={() => setOpenJob(null)} />
+        <AppBar title={`Hi, ${technician.first_name}`} />
         <div style={{ padding: "0 18px 30px" }}>
-          <Card style={{ marginBottom: 14 }}>
-            <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 15 }}>{job.customers.first_name} {job.customers.last_name}</div>
-            <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginTop: 2 }}>{job.properties.address_line1}, {job.properties.city}, {job.properties.state} {job.properties.postal_code}</div>
-            <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{job.customers.phone}</div>
-          </Card>
-          <Card style={{ marginBottom: 14 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <Icon size={16} color={C.terracotta} />
-              <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14 }}>{job.category} — {humanize(job.urgency)}</div>
-            </div>
-            <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginTop: 4 }}>{job.problem_description}</div>
-            <div style={{ marginTop: 10 }}><Badge color={sc.color} bg={sc.bg}>{humanize(job.status)}</Badge></div>
-            {job.internal_notes && job.internal_notes.startsWith("Covered by") && (
-              <div style={{ marginTop: 8, fontFamily: BODY, fontSize: 12, color: C.leaf }}>{job.internal_notes}</div>
-            )}
-          </Card>
-          <SectionLabel>Job Notes</SectionLabel>
-          <Card><textarea rows={3} defaultValue={job.internal_notes || ""} onChange={(e) => setNoteDraft(e.target.value)} placeholder="Diagnosis, parts used, work performed…" style={{ width: "100%", border: "none", fontFamily: BODY, fontSize: 13.5, resize: "none" }} /></Card>
-          <div style={{ marginTop: 14 }}><PrimaryButton full onClick={() => advance(job)} disabled={job.status === "completed"}>{job.status === "completed" ? "Completed" : "Advance Status"}</PrimaryButton></div>
+          <SectionLabel>Today's Jobs</SectionLabel>
+          {todays.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginBottom: 18 }}>No jobs scheduled for today.</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 20 }}>
+            {todays.map((j) => <JobCard key={j.id} job={j} onOpen={openJob} onStart={(job) => { openJob(job); startJob(job); }} onCall={call} onDirections={directions} />)}
+          </div>
+          {upcoming.length > 0 && (
+            <>
+              <SectionLabel>Upcoming</SectionLabel>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {upcoming.map((j) => <JobCard key={j.id} job={j} onOpen={openJob} onStart={(job) => { openJob(job); startJob(job); }} onCall={call} onDirections={directions} />)}
+              </div>
+            </>
+          )}
+          <div style={{ marginTop: 20 }}><GhostButton full onClick={logOut}>Log Out</GhostButton></div>
         </div>
       </div>
     );
   }
 
   return (
-    <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
-      <AppBar title={`My Jobs — ${technician.first_name}`} />
-      <div style={{ padding: "0 18px 30px", display: "flex", flexDirection: "column", gap: 10 }}>
-        {dataLoading && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>Loading…</div>}
-        {!dataLoading && jobs.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No jobs assigned to you yet.</div>}
-        {jobs.map(j => {
-          const sc = statusColor(humanize(j.status));
-          const Icon = serviceLineIcon(j.service_lines ? j.service_lines.key : null);
-          return (
-            <Card key={j.id} onClick={() => { setOpenJob(j); setNoteDraft(""); }} style={{ cursor: "pointer" }}>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <Icon size={15} color={C.terracotta} />
-                  <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14 }}>{j.request_number} · {j.category}</div>
-                </div>
-                <Badge color={sc.color} bg={sc.bg}>{humanize(j.status)}</Badge>
-              </div>
-              <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 6 }}>{j.customers.first_name} {j.customers.last_name} · {j.properties.address_line1}</div>
-            </Card>
-          );
-        })}
-        <div style={{ marginTop: 8 }}><GhostButton full onClick={logOut}>Log Out</GhostButton></div>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: C.cream }}>
+      <SyncPill pending={pending} online={online} onSync={() => flushOutbox().then(refreshPending)} />
+      <div style={{ flex: 1, overflow: "hidden" }}>{body}</div>
+      {modalsHost}
+      <div style={{ display: "flex", borderTop: `1px solid ${C.line}`, background: "#fff" }}>
+        {TECH_TABS.map((t) => (
+          <div key={t.key} onClick={() => { setTab(t.key); setOpenJobId(null); setOpenCustomerId(null); setHistoryFor(null); }} style={{ flex: 1, textAlign: "center", padding: "10px 0 12px", cursor: "pointer" }}>
+            <t.icon size={20} color={tab === t.key ? C.terracotta : C.ash} style={{ margin: "0 auto" }} />
+            <div style={{ fontFamily: BODY, fontSize: 10.5, fontWeight: 600, color: tab === t.key ? C.terracotta : C.ash, marginTop: 3 }}>{t.label}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
