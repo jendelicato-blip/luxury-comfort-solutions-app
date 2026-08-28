@@ -1803,6 +1803,199 @@ function TechnicianApp() {
 
 /* ============================= ADMIN PORTAL ============================= */
 
+const enumOptions = (values) => values.map((v) => ({ value: v, label: humanize(v) }));
+const SERVICE_URGENCY_OPTIONS = enumOptions(["emergency", "as_soon_as_possible", "normal", "not_urgent"]);
+const SERVICE_REQUEST_STATUS_OPTIONS = enumOptions(["submitted", "received", "reviewing", "appointment_scheduled", "technician_assigned", "technician_en_route", "in_progress", "completed", "cancelled"]);
+const APPOINTMENT_STATUS_OPTIONS = enumOptions(["requested", "confirmed", "technician_assigned", "technician_en_route", "in_progress", "completed", "cancelled"]);
+const ORDER_STATUS_OPTIONS = enumOptions(["submitted", "received", "processing", "ready", "scheduled_for_delivery", "completed", "cancelled"]);
+const BILLING_STATUS_OPTIONS = enumOptions(["not_billed", "pending_billing", "billed", "paid_outside_app"]);
+const DELIVERY_PREF_OPTIONS = enumOptions(["delivery", "pickup"]);
+const REMINDER_TYPE_OPTIONS = enumOptions(["filter_change", "ac_maintenance", "furnace_maintenance", "heat_pump_maintenance", "thermostat_check", "humidifier_service", "air_purifier_filter", "uv_system_service", "warranty_expiration", "equipment_replacement", "maintenance_plan_renewal", "appointment", "service_follow_up"]);
+const REMINDER_STATUS_OPTIONS = enumOptions(["upcoming", "due", "past_due", "snoozed", "completed", "dismissed"]);
+const CONTACT_METHOD_OPTIONS = enumOptions(["phone", "email", "text"]);
+const TECHNICIAN_STATUS_OPTIONS = enumOptions(["available", "on_job", "off_duty"]);
+
+const emptyToNull = (v) => (v === "" || v === undefined ? null : v);
+const genNumber = (prefix) => `${prefix}-${Math.floor(10000 + Math.random() * 89999)}`;
+function firstPropertyId(d, customerId) {
+  const prop = d.properties.find((p) => p.customer_id === customerId);
+  if (!prop) throw new Error("This customer has no property on file, so a request/appointment/order can't be created for them yet.");
+  return prop.id;
+}
+
+// One spec per admin-manageable entity: table name, list key in `d`, form fields (create vs edit
+// can differ), and how to turn form state into a REST payload. Drives the generic Add/Edit/Delete
+// modals below so each tab doesn't need its own bespoke form.
+function getEntitySpecs(d) {
+  const customerOptions = d.customers.map((c) => ({ value: c.id, label: `${c.first_name} ${c.last_name} (${c.account_number})` }));
+  const technicianOptions = d.technicians.map((t) => ({ value: t.id, label: `${t.first_name} ${t.last_name}` }));
+  const serviceLineOptions = d.serviceLines.map((s) => ({ value: s.id, label: s.label }));
+  const categoryOptions = d.productCategories.map((c) => ({ value: c.id, label: c.name }));
+  const csvToArray = (s) => (s ? s.split(",").map((x) => x.trim()).filter(Boolean) : []);
+
+  return {
+    product: {
+      table: "products", listKey: "products", label: "product", nameOf: (r) => r.name,
+      fields: () => [
+        { key: "category_id", label: "Category", type: "select", placeholder: "Select category…", options: categoryOptions },
+        { key: "name", label: "Name", type: "text" },
+        { key: "description", label: "Description", type: "textarea" },
+        { key: "size", label: "Size", type: "text" },
+        { key: "merv_rating", label: "MERV rating", type: "number" },
+        { key: "price", label: "Price ($)", type: "number" },
+        { key: "is_active", label: "Active", type: "checkbox", default: true },
+        { key: "is_customer_visible", label: "Visible to customers", type: "checkbox", default: true },
+      ],
+      buildPayload: (f) => ({ ...f, merv_rating: f.merv_rating ? Number(f.merv_rating) : null, price: f.price ? Number(f.price) : null }),
+    },
+    promotion: {
+      table: "promotions", listKey: "promotions", label: "promotion", nameOf: (r) => r.title,
+      fields: () => [
+        { key: "title", label: "Title", type: "text" },
+        { key: "description", label: "Description", type: "textarea" },
+        { key: "discount_text", label: "Discount text (e.g. \"$25 off\")", type: "text" },
+        { key: "promo_code", label: "Promo code", type: "text" },
+        { key: "terms", label: "Terms", type: "textarea" },
+        { key: "start_date", label: "Start date", type: "date" },
+        { key: "end_date", label: "End date", type: "date" },
+        { key: "is_active", label: "Active", type: "checkbox", default: true },
+      ],
+      buildPayload: (f) => f,
+    },
+    plan: {
+      table: "maintenance_plans", listKey: "plans", label: "membership plan", nameOf: (r) => r.name,
+      fields: () => [
+        { key: "name", label: "Name", type: "text" },
+        { key: "tagline", label: "Tagline", type: "text" },
+        { key: "description", label: "Description", type: "textarea" },
+        { key: "monthly_price", label: "Monthly price ($)", type: "number" },
+        { key: "annual_price", label: "Annual price ($)", type: "number" },
+        { key: "discount_percent", label: "Discount %", type: "number" },
+        { key: "included_services", label: "Included services", type: "text", hint: "Comma-separated, e.g. hvac_tuneup, plumbing_inspection" },
+        { key: "sort_order", label: "Sort order", type: "number", default: 0 },
+        { key: "is_active", label: "Active", type: "checkbox", default: true },
+        { key: "is_highlighted", label: "Highlighted", type: "checkbox", default: false },
+      ],
+      buildPayload: (f) => ({
+        ...f,
+        monthly_price: f.monthly_price ? Number(f.monthly_price) : null,
+        annual_price: f.annual_price ? Number(f.annual_price) : null,
+        discount_percent: f.discount_percent ? Number(f.discount_percent) : 0,
+        sort_order: f.sort_order ? Number(f.sort_order) : 0,
+        included_services: csvToArray(f.included_services),
+      }),
+    },
+    technician: {
+      table: "technicians", listKey: "technicians", label: "technician", nameOf: (r) => `${r.first_name} ${r.last_name}`,
+      fields: () => [
+        { key: "first_name", label: "First name", type: "text" },
+        { key: "last_name", label: "Last name", type: "text" },
+        { key: "status", label: "Status", type: "select", options: TECHNICIAN_STATUS_OPTIONS },
+      ],
+      buildPayload: (f) => f,
+    },
+    customer: {
+      table: "customers", listKey: "customers", label: "customer", nameOf: (r) => `${r.first_name} ${r.last_name}`,
+      fields: () => [
+        { key: "first_name", label: "First name", type: "text" },
+        { key: "last_name", label: "Last name", type: "text" },
+        { key: "preferred_contact", label: "Preferred contact", type: "select", options: CONTACT_METHOD_OPTIONS },
+        { key: "marketing_opt_in", label: "Marketing opt-in", type: "checkbox" },
+        { key: "notes", label: "Notes", type: "textarea" },
+      ],
+      buildPayload: (f) => f,
+    },
+    request: {
+      table: "service_requests", listKey: "requests", label: "service request", nameOf: (r) => r.request_number,
+      fields: (mode) => mode === "create" ? [
+        { key: "customer_id", label: "Customer", type: "select", placeholder: "Select customer…", options: customerOptions },
+        { key: "service_line_id", label: "Service line", type: "select", placeholder: "Select service line…", options: serviceLineOptions },
+        { key: "category", label: "Category", type: "text", hint: "e.g. No Cooling, Leak, Annual Tune-Up" },
+        { key: "problem_description", label: "Problem description", type: "textarea" },
+        { key: "urgency", label: "Urgency", type: "select", options: SERVICE_URGENCY_OPTIONS, default: "normal" },
+        { key: "preferred_date", label: "Preferred date", type: "date" },
+        { key: "preferred_window", label: "Preferred window", type: "text" },
+      ] : [
+        { key: "status", label: "Status", type: "select", options: SERVICE_REQUEST_STATUS_OPTIONS },
+        { key: "urgency", label: "Urgency", type: "select", options: SERVICE_URGENCY_OPTIONS },
+        { key: "assigned_technician_id", label: "Assigned technician", type: "select", placeholder: "Unassigned", options: technicianOptions },
+        { key: "category", label: "Category", type: "text" },
+        { key: "problem_description", label: "Problem description", type: "textarea" },
+        { key: "preferred_date", label: "Preferred date", type: "date" },
+        { key: "preferred_window", label: "Preferred window", type: "text" },
+        { key: "internal_notes", label: "Internal notes", type: "textarea" },
+      ],
+      buildCreatePayload: (f) => ({
+        request_number: genNumber("SR"), customer_id: f.customer_id, property_id: firstPropertyId(d, f.customer_id),
+        service_line_id: f.service_line_id, category: f.category, problem_description: f.problem_description,
+        urgency: f.urgency, preferred_date: emptyToNull(f.preferred_date), preferred_window: emptyToNull(f.preferred_window),
+      }),
+      buildUpdatePayload: (f) => ({
+        status: f.status, urgency: f.urgency, assigned_technician_id: emptyToNull(f.assigned_technician_id),
+        category: f.category, problem_description: f.problem_description,
+        preferred_date: emptyToNull(f.preferred_date), preferred_window: emptyToNull(f.preferred_window),
+        internal_notes: emptyToNull(f.internal_notes),
+      }),
+    },
+    appointment: {
+      table: "appointments", listKey: "appointments", label: "appointment", nameOf: (r) => r.appointment_number,
+      fields: (mode) => [
+        ...(mode === "create" ? [{ key: "customer_id", label: "Customer", type: "select", placeholder: "Select customer…", options: customerOptions }] : []),
+        { key: "appointment_type", label: "Appointment type", type: "text", hint: "e.g. HVAC Maintenance, Estimate" },
+        { key: "scheduled_date", label: "Scheduled date", type: "date" },
+        { key: "scheduled_window", label: "Scheduled window", type: "text" },
+        { key: "technician_id", label: "Assigned technician", type: "select", placeholder: "Unassigned", options: technicianOptions },
+        { key: "status", label: "Status", type: "select", options: APPOINTMENT_STATUS_OPTIONS, default: "requested" },
+        { key: "customer_notes", label: "Customer notes", type: "textarea" },
+        ...(mode === "edit" ? [{ key: "internal_notes", label: "Internal notes", type: "textarea" }] : []),
+      ],
+      buildCreatePayload: (f) => ({
+        appointment_number: genNumber("APT"), customer_id: f.customer_id, property_id: firstPropertyId(d, f.customer_id),
+        appointment_type: f.appointment_type, scheduled_date: emptyToNull(f.scheduled_date), scheduled_window: emptyToNull(f.scheduled_window),
+        technician_id: emptyToNull(f.technician_id), status: f.status, customer_notes: emptyToNull(f.customer_notes),
+      }),
+      buildUpdatePayload: (f) => ({
+        appointment_type: f.appointment_type, scheduled_date: emptyToNull(f.scheduled_date), scheduled_window: emptyToNull(f.scheduled_window),
+        technician_id: emptyToNull(f.technician_id), status: f.status, customer_notes: emptyToNull(f.customer_notes),
+        internal_notes: emptyToNull(f.internal_notes),
+      }),
+    },
+    order: {
+      table: "orders", listKey: "orders", label: "order", nameOf: (r) => r.order_number,
+      fields: (mode) => [
+        ...(mode === "create" ? [{ key: "customer_id", label: "Customer", type: "select", placeholder: "Select customer…", options: customerOptions }] : []),
+        { key: "status", label: "Status", type: "select", options: ORDER_STATUS_OPTIONS, default: "submitted" },
+        { key: "billing_status", label: "Billing status", type: "select", options: BILLING_STATUS_OPTIONS, default: "not_billed" },
+        { key: "delivery_preference", label: "Delivery preference", type: "select", options: DELIVERY_PREF_OPTIONS, default: "delivery" },
+        { key: "customer_notes", label: "Customer notes", type: "textarea" },
+        ...(mode === "edit" ? [{ key: "internal_notes", label: "Internal notes", type: "textarea" }] : []),
+      ],
+      buildCreatePayload: (f) => ({
+        order_number: genNumber("LCS"), customer_id: f.customer_id, property_id: firstPropertyId(d, f.customer_id),
+        status: f.status, billing_status: f.billing_status, delivery_preference: f.delivery_preference,
+        customer_notes: emptyToNull(f.customer_notes),
+      }),
+      buildUpdatePayload: (f) => ({
+        status: f.status, billing_status: f.billing_status, delivery_preference: f.delivery_preference,
+        customer_notes: emptyToNull(f.customer_notes), internal_notes: emptyToNull(f.internal_notes),
+      }),
+      note: "Creating an order here sets it up for the customer's account; line items still need to be added via the database directly for now.",
+    },
+    reminder: {
+      table: "reminders", listKey: "reminders", label: "reminder", nameOf: (r) => humanize(r.reminder_type),
+      fields: (mode) => [
+        ...(mode === "create" ? [{ key: "customer_id", label: "Customer", type: "select", placeholder: "Select customer…", options: customerOptions }] : []),
+        { key: "reminder_type", label: "Type", type: "select", options: REMINDER_TYPE_OPTIONS },
+        { key: "message", label: "Message", type: "textarea" },
+        { key: "due_date", label: "Due date", type: "date" },
+        { key: "status", label: "Status", type: "select", options: REMINDER_STATUS_OPTIONS, default: "upcoming" },
+      ],
+      buildCreatePayload: (f) => ({ customer_id: f.customer_id, reminder_type: f.reminder_type, message: f.message, due_date: f.due_date, status: f.status }),
+      buildUpdatePayload: (f) => ({ reminder_type: f.reminder_type, message: f.message, due_date: f.due_date, status: f.status }),
+    },
+  };
+}
+
 function KPI({ label, value, icon: Icon, accent, onClick }) {
   return (
     <Card onClick={onClick} style={{ flex: "1 1 150px", cursor: onClick ? "pointer" : "default" }}>
@@ -1816,7 +2009,84 @@ function KPI({ label, value, icon: Icon, accent, onClick }) {
     </Card>
   );
 }
-function AdminTable({ headers, rows }) {
+function Modal({ onClose, children, maxWidth = 420 }) {
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(28,27,25,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, borderRadius: 16, padding: 20, maxWidth, width: "100%", maxHeight: "85vh", overflowY: "auto", border: `1px solid ${C.line}` }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Generic config-driven create/edit form. `fields` describes each input; see ENTITY_SPECS.
+function EntityFormModal({ title, fields, initial, onSave, onClose, saving, error }) {
+  const [form, setForm] = useState(() => {
+    const f = {};
+    fields.forEach((fd) => { f[fd.key] = initial ? (initial[fd.key] ?? "") : (fd.default ?? (fd.type === "checkbox" ? false : "")); });
+    return f;
+  });
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const fieldStyle = { fontFamily: BODY, padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14, width: "100%", background: "#fff" };
+
+  return (
+    <Modal onClose={onClose}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17, marginBottom: 14 }}>{title}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {fields.map((fd) => (
+          <div key={fd.key}>
+            <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>{fd.label}</div>
+            {fd.type === "select" ? (
+              <select value={form[fd.key]} onChange={(e) => set(fd.key, e.target.value)} style={fieldStyle}>
+                {fd.placeholder && <option value="">{fd.placeholder}</option>}
+                {fd.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            ) : fd.type === "textarea" ? (
+              <textarea value={form[fd.key]} onChange={(e) => set(fd.key, e.target.value)} rows={3} style={{ ...fieldStyle, resize: "none" }} />
+            ) : fd.type === "checkbox" ? (
+              <input type="checkbox" checked={!!form[fd.key]} onChange={(e) => set(fd.key, e.target.checked)} style={{ width: 18, height: 18 }} />
+            ) : (
+              <input
+                type={fd.type === "number" ? "number" : fd.type === "date" ? "date" : "text"}
+                step={fd.type === "number" ? "0.01" : undefined}
+                value={form[fd.key]}
+                onChange={(e) => set(fd.key, e.target.value)}
+                style={fieldStyle}
+              />
+            )}
+            {fd.hint && <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, marginTop: 3 }}>{fd.hint}</div>}
+          </div>
+        ))}
+      </div>
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 12 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={() => onSave(form)}>{saving ? "Saving…" : "Save"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function ConfirmDeleteModal({ title, message, requireText, onConfirm, onClose, loading, error }) {
+  const [typed, setTyped] = useState("");
+  const ok = !requireText || typed.trim() === requireText;
+  return (
+    <Modal onClose={onClose}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17, marginBottom: 8, color: C.maple }}>{title}</div>
+      <div style={{ fontFamily: BODY, fontSize: 13.5, color: C.ink, marginBottom: 14, lineHeight: 1.5 }}>{message}</div>
+      {requireText && (
+        <>
+          <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash, marginBottom: 6 }}>Type "{requireText}" to confirm:</div>
+          <input value={typed} onChange={(e) => setTyped(e.target.value)} style={{ fontFamily: BODY, padding: "10px 12px", borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14, width: "100%", marginBottom: 14 }} />
+        </>
+      )}
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginBottom: 12 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 10 }}>
+        <GhostButton full onClick={onClose}>Cancel</GhostButton>
+        <PrimaryButton full danger disabled={!ok || loading} onClick={onConfirm}>{loading ? "Deleting…" : "Delete"}</PrimaryButton>
+      </div>
+    </Modal>
+  );
+}
+
+function AdminTable({ headers, rows, onEdit, onDelete }) {
   const [selected, setSelected] = useState(null); // row index, or null
   return (
     <>
@@ -1831,19 +2101,23 @@ function AdminTable({ headers, rows }) {
         </table>
       </div>
       {selected !== null && rows[selected] && (
-        <div onClick={() => setSelected(null)} style={{ position: "fixed", inset: 0, background: "rgba(28,27,25,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
-          <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, borderRadius: 16, padding: 20, maxWidth: 420, width: "100%", maxHeight: "80vh", overflowY: "auto", border: `1px solid ${C.line}` }}>
-            <div onClick={() => setSelected(null)} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", marginBottom: 14, color: C.terracotta, fontFamily: BODY, fontWeight: 700, fontSize: 13 }}>
+        <Modal onClose={() => setSelected(null)}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div onClick={() => setSelected(null)} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", color: C.terracotta, fontFamily: BODY, fontWeight: 700, fontSize: 13 }}>
               <ChevronLeft size={18} /> Back
             </div>
-            {headers.map((h, j) => (
-              <div key={h} style={{ padding: "9px 0", borderBottom: j < headers.length - 1 ? `1px solid ${C.line}` : "none" }}>
-                <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 3 }}>{h}</div>
-                <div style={{ fontFamily: BODY, fontSize: 15, color: C.ink }}>{rows[selected][j]}</div>
-              </div>
-            ))}
+            <div style={{ display: "flex", gap: 14 }}>
+              {onEdit && <span onClick={() => { onEdit(selected); setSelected(null); }} style={{ cursor: "pointer", color: C.steel, fontFamily: BODY, fontWeight: 700, fontSize: 13 }}>Edit</span>}
+              {onDelete && <span onClick={() => { onDelete(selected); setSelected(null); }} style={{ cursor: "pointer", color: C.maple, fontFamily: BODY, fontWeight: 700, fontSize: 13 }}>Delete</span>}
+            </div>
           </div>
-        </div>
+          {headers.map((h, j) => (
+            <div key={h} style={{ padding: "9px 0", borderBottom: j < headers.length - 1 ? `1px solid ${C.line}` : "none" }}>
+              <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 3 }}>{h}</div>
+              <div style={{ fontFamily: BODY, fontSize: 15, color: C.ink }}>{rows[selected][j]}</div>
+            </div>
+          ))}
+        </Modal>
       )}
     </>
   );
@@ -1859,6 +2133,47 @@ function AdminPortal() {
   const [d, setD] = useState(null); // all admin data
   const [quickFilter, setQuickFilter] = useState(null); // { tab, predicate, label }
   const goTo = (tabKey, filter) => { setTab(tabKey); setQuickFilter(filter || null); };
+
+  // Generic Add/Edit/Delete modal state, driven by ENTITY_SPECS (see getEntitySpecs above).
+  const [modal, setModal] = useState(null); // { kind: "create"|"edit"|"delete", entity, row }
+  const [modalBusy, setModalBusy] = useState(false);
+  const [modalError, setModalError] = useState(null);
+  const closeModal = () => { setModal(null); setModalError(null); setModalBusy(false); };
+
+  const saveEntity = async (form) => {
+    const spec = getEntitySpecs(d)[modal.entity];
+    setModalBusy(true); setModalError(null);
+    try {
+      if (modal.kind === "create") {
+        const payload = spec.buildCreatePayload ? spec.buildCreatePayload(form) : spec.buildPayload(form);
+        await restRequest(spec.table, { method: "POST", token: session.access_token, body: [payload] });
+      } else {
+        const payload = spec.buildUpdatePayload ? spec.buildUpdatePayload(form) : spec.buildPayload(form);
+        await restRequest(`${spec.table}?id=eq.${modal.row.id}`, { method: "PATCH", token: session.access_token, body: payload });
+      }
+      await loadAll(session.access_token);
+      closeModal();
+    } catch (e) {
+      setModalError(e.message);
+      setModalBusy(false);
+    }
+  };
+
+  const deleteEntity = async () => {
+    const spec = getEntitySpecs(d)[modal.entity];
+    setModalBusy(true); setModalError(null);
+    try {
+      await restRequest(`${spec.table}?id=eq.${modal.row.id}`, { method: "DELETE", token: session.access_token });
+      await loadAll(session.access_token);
+      closeModal();
+    } catch (e) {
+      const friendly = /foreign key|violates/i.test(e.message)
+        ? `Can't delete: other records (jobs, orders, or history) still reference this ${spec.label}. Remove or reassign those first.`
+        : e.message;
+      setModalError(friendly);
+      setModalBusy(false);
+    }
+  };
 
   const handleSignIn = async (email, password) => {
     setAuthLoading(true); setAuthError(null);
@@ -1879,7 +2194,7 @@ function AdminPortal() {
   const loadAll = async (token) => {
     setDataLoading(true);
     try {
-      const [customers, requests, appointments, orders, products, reminders, reminderTemplates, plans, memberships, promos, technicians, settingsRows] = await Promise.all([
+      const [customers, requests, appointments, orders, products, reminders, reminderTemplates, plans, memberships, promos, technicians, settingsRows, properties, serviceLines, productCategories] = await Promise.all([
         restRequest(`customers?select=*&order=created_at.desc`, { token }),
         restRequest(`service_requests?select=*,customers(first_name,last_name),service_lines(label),technicians(first_name,last_name)&order=created_at.desc`, { token }),
         restRequest(`appointments?select=*,customers(first_name,last_name),technicians(first_name,last_name)&order=scheduled_date.asc.nullslast`, { token }),
@@ -1892,10 +2207,13 @@ function AdminPortal() {
         restRequest(`promotions?select=*&order=start_date.desc`, { token }),
         restRequest(`technicians?select=*`, { token }),
         restRequest(`business_settings?select=*`, { token }),
+        restRequest(`properties?select=id,customer_id,address_line1&order=is_primary.desc`, { token }),
+        restRequest(`service_lines?select=id,key,label&order=sort_order.asc`, { token }),
+        restRequest(`product_categories?select=id,name&order=sort_order.asc`, { token }),
       ]);
       setD({
         customers, requests, appointments, orders, products, reminders, reminderTemplates,
-        plans, memberships, promotions: promos, technicians,
+        plans, memberships, promotions: promos, technicians, properties, serviceLines, productCategories,
         settings: Object.fromEntries(settingsRows.map((s) => [s.key, s.value])),
       });
     } finally {
@@ -2010,7 +2328,12 @@ function AdminPortal() {
               </div>
             </div>
             {d.customers.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No customers yet.</div>}
-            <AdminTable headers={["Name", "Account #", "Phone", "Customer Since"]} rows={d.customers.map(c => [`${c.first_name} ${c.last_name}`, c.account_number, c.phone || "—", (c.created_at || "").slice(0, 10)])} />
+            <AdminTable
+              headers={["Name", "Account #", "Phone", "Customer Since"]}
+              rows={d.customers.map(c => [`${c.first_name} ${c.last_name}`, c.account_number, c.phone || "—", (c.created_at || "").slice(0, 10)])}
+              onEdit={(i) => setModal({ kind: "edit", entity: "customer", row: d.customers[i] })}
+              onDelete={(i) => setModal({ kind: "delete", entity: "customer", row: d.customers[i] })}
+            />
           </Card>
         )}
 
@@ -2018,23 +2341,33 @@ function AdminPortal() {
           const activeFilter = quickFilter && quickFilter.tab === "requests" ? quickFilter : null;
           const list = activeFilter ? d.requests.filter(activeFilter.predicate) : d.requests;
           return (
-          <Card>
-            {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
-            {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No requests match this filter." : "No service requests yet."}</div>}
-            <AdminTable headers={["Request #", "Customer", "Service", "Category", "Status", "Technician", "Assign"]} rows={list.map(r => {
-              const sc = statusColor(humanize(r.status));
-              return [
-                r.request_number, r.customers ? `${r.customers.first_name} ${r.customers.last_name}` : "—",
-                r.service_lines ? r.service_lines.label : "—", r.category,
-                <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>,
-                r.technicians ? `${r.technicians.first_name} ${r.technicians.last_name}` : "Unassigned",
-                <select onClick={(e) => e.stopPropagation()} onChange={(e) => e.target.value && assignTechnician(r.id, e.target.value)} defaultValue="" style={{ fontFamily: BODY, fontSize: 12, padding: 6, borderRadius: 8, border: `1px solid ${C.line}` }}>
-                  <option value="">Assign…</option>
-                  {d.technicians.map(t => <option key={t.id} value={t.id}>{t.first_name} {t.last_name}</option>)}
-                </select>,
-              ];
-            })} />
-          </Card>
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <PrimaryButton onClick={() => setModal({ kind: "create", entity: "request" })}>+ Add Service Request</PrimaryButton>
+            </div>
+            <Card>
+              {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
+              {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No requests match this filter." : "No service requests yet."}</div>}
+              <AdminTable
+                headers={["Request #", "Customer", "Service", "Category", "Status", "Technician", "Assign"]}
+                rows={list.map(r => {
+                  const sc = statusColor(humanize(r.status));
+                  return [
+                    r.request_number, r.customers ? `${r.customers.first_name} ${r.customers.last_name}` : "—",
+                    r.service_lines ? r.service_lines.label : "—", r.category,
+                    <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>,
+                    r.technicians ? `${r.technicians.first_name} ${r.technicians.last_name}` : "Unassigned",
+                    <select onClick={(e) => e.stopPropagation()} onChange={(e) => e.target.value && assignTechnician(r.id, e.target.value)} defaultValue="" style={{ fontFamily: BODY, fontSize: 12, padding: 6, borderRadius: 8, border: `1px solid ${C.line}` }}>
+                      <option value="">Assign…</option>
+                      {d.technicians.map(t => <option key={t.id} value={t.id}>{t.first_name} {t.last_name}</option>)}
+                    </select>,
+                  ];
+                })}
+                onEdit={(i) => setModal({ kind: "edit", entity: "request", row: list[i] })}
+                onDelete={(i) => setModal({ kind: "delete", entity: "request", row: list[i] })}
+              />
+            </Card>
+          </>
           );
         })()}
 
@@ -2042,17 +2375,27 @@ function AdminPortal() {
           const activeFilter = quickFilter && quickFilter.tab === "appointments" ? quickFilter : null;
           const list = activeFilter ? d.appointments.filter(activeFilter.predicate) : d.appointments;
           return (
-          <Card>
-            {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
-            {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No appointments match this filter." : "No appointments yet."}</div>}
-            <AdminTable headers={["Appt #", "Customer", "Type", "Date", "Window", "Technician", "Status"]} rows={list.map(a => {
-              const sc = statusColor(humanize(a.status));
-              return [a.appointment_number, a.customers ? `${a.customers.first_name} ${a.customers.last_name}` : "—", a.appointment_type, a.scheduled_date || "—", a.scheduled_window || "—", a.technicians ? `${a.technicians.first_name} ${a.technicians.last_name}` : "Unassigned", <Badge color={sc.color} bg={sc.bg}>{humanize(a.status)}</Badge>];
-            })} />
-            <div style={{ marginTop: 14 }}><SectionLabel>Availability Settings</SectionLabel>
-              <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>Business hours, time windows, and technician availability are configured under Settings.</div>
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <PrimaryButton onClick={() => setModal({ kind: "create", entity: "appointment" })}>+ Add Appointment</PrimaryButton>
             </div>
-          </Card>
+            <Card>
+              {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
+              {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No appointments match this filter." : "No appointments yet."}</div>}
+              <AdminTable
+                headers={["Appt #", "Customer", "Type", "Date", "Window", "Technician", "Status"]}
+                rows={list.map(a => {
+                  const sc = statusColor(humanize(a.status));
+                  return [a.appointment_number, a.customers ? `${a.customers.first_name} ${a.customers.last_name}` : "—", a.appointment_type, a.scheduled_date || "—", a.scheduled_window || "—", a.technicians ? `${a.technicians.first_name} ${a.technicians.last_name}` : "Unassigned", <Badge color={sc.color} bg={sc.bg}>{humanize(a.status)}</Badge>];
+                })}
+                onEdit={(i) => setModal({ kind: "edit", entity: "appointment", row: list[i] })}
+                onDelete={(i) => setModal({ kind: "delete", entity: "appointment", row: list[i] })}
+              />
+              <div style={{ marginTop: 14 }}><SectionLabel>Availability Settings</SectionLabel>
+                <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>Business hours, time windows, and technician availability are configured under Settings.</div>
+              </div>
+            </Card>
+          </>
           );
         })()}
 
@@ -2060,28 +2403,48 @@ function AdminPortal() {
           const activeFilter = quickFilter && quickFilter.tab === "orders" ? quickFilter : null;
           const list = activeFilter ? d.orders.filter(activeFilter.predicate) : d.orders;
           return (
-          <Card>
-            {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
-            {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No orders match this filter." : "No orders yet."}</div>}
-            <AdminTable headers={["Order #", "Customer", "Items", "Status", "Billing", "Action"]} rows={list.map(o => {
-              const sc = statusColor(humanize(o.status));
-              return [
-                o.order_number, o.customers ? `${o.customers.first_name} ${o.customers.last_name}` : "—",
-                (o.order_items || []).map(it => `${it.quantity} × ${it.products ? it.products.name : ""}`).join(", "),
-                <Badge color={sc.color} bg={sc.bg}>{humanize(o.status)}</Badge>,
-                <Badge>{humanize(o.billing_status)}</Badge>,
-                <GhostButton onClick={(e) => { e.stopPropagation(); advanceOrderStatus(o); }}>Advance</GhostButton>,
-              ];
-            })} />
-          </Card>
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <PrimaryButton onClick={() => setModal({ kind: "create", entity: "order" })}>+ Add Order</PrimaryButton>
+            </div>
+            <Card>
+              {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
+              {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No orders match this filter." : "No orders yet."}</div>}
+              <AdminTable
+                headers={["Order #", "Customer", "Items", "Status", "Billing", "Action"]}
+                rows={list.map(o => {
+                  const sc = statusColor(humanize(o.status));
+                  return [
+                    o.order_number, o.customers ? `${o.customers.first_name} ${o.customers.last_name}` : "—",
+                    (o.order_items || []).map(it => `${it.quantity} × ${it.products ? it.products.name : ""}`).join(", ") || "—",
+                    <Badge color={sc.color} bg={sc.bg}>{humanize(o.status)}</Badge>,
+                    <Badge>{humanize(o.billing_status)}</Badge>,
+                    <GhostButton onClick={(e) => { e.stopPropagation(); advanceOrderStatus(o); }}>Advance</GhostButton>,
+                  ];
+                })}
+                onEdit={(i) => setModal({ kind: "edit", entity: "order", row: list[i] })}
+                onDelete={(i) => setModal({ kind: "delete", entity: "order", row: list[i] })}
+              />
+            </Card>
+          </>
           );
         })()}
 
         {tab === "products" && (
-          <Card>
-            {d.products.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No products yet.</div>}
-            <AdminTable headers={["Name", "Category", "Size", "MERV", "Price", "Status"]} rows={d.products.map(p => [p.name, p.product_categories ? p.product_categories.name : "—", p.size || "—", p.merv_rating || "—", "$" + Number(p.price).toFixed(2), <Badge color="#2F5D34" bg="#E4EFDE">{p.is_active ? "Active" : "Inactive"}</Badge>])} />
-          </Card>
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <PrimaryButton onClick={() => setModal({ kind: "create", entity: "product" })}>+ Add Product</PrimaryButton>
+            </div>
+            <Card>
+              {d.products.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No products yet.</div>}
+              <AdminTable
+                headers={["Name", "Category", "Size", "MERV", "Price", "Status"]}
+                rows={d.products.map(p => [p.name, p.product_categories ? p.product_categories.name : "—", p.size || "—", p.merv_rating || "—", "$" + Number(p.price).toFixed(2), <Badge color="#2F5D34" bg="#E4EFDE">{p.is_active ? "Active" : "Inactive"}</Badge>])}
+                onEdit={(i) => setModal({ kind: "edit", entity: "product", row: d.products[i] })}
+                onDelete={(i) => setModal({ kind: "delete", entity: "product", row: d.products[i] })}
+              />
+            </Card>
+          </>
         )}
 
         {tab === "reminders" && (() => {
@@ -2093,14 +2456,22 @@ function AdminPortal() {
               <SectionLabel>Reminder Templates (configurable intervals)</SectionLabel>
               <AdminTable headers={["Type", "Repeat Interval", "Lead Time"]} rows={d.reminderTemplates.map(t => [humanize(t.reminder_type), t.repeat_interval_days ? `Every ${t.repeat_interval_days} days` : "—", `${t.lead_time_days} days before`])} />
             </Card>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <PrimaryButton onClick={() => setModal({ kind: "create", entity: "reminder" })}>+ Add Reminder</PrimaryButton>
+            </div>
             <Card>
               <SectionLabel>Active Reminders</SectionLabel>
               {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
               {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No reminders match this filter." : "None yet."}</div>}
-              <AdminTable headers={["Type", "Customer", "Due", "Status"]} rows={list.map(r => {
-                const sc = statusColor(humanize(r.status));
-                return [humanize(r.reminder_type), r.customers ? `${r.customers.first_name} ${r.customers.last_name}` : "—", r.due_date, <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>];
-              })} />
+              <AdminTable
+                headers={["Type", "Customer", "Due", "Status"]}
+                rows={list.map(r => {
+                  const sc = statusColor(humanize(r.status));
+                  return [humanize(r.reminder_type), r.customers ? `${r.customers.first_name} ${r.customers.last_name}` : "—", r.due_date, <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>];
+                })}
+                onEdit={(i) => setModal({ kind: "edit", entity: "reminder", row: list[i] })}
+                onDelete={(i) => setModal({ kind: "delete", entity: "reminder", row: list[i] })}
+              />
             </Card>
           </>
           );
@@ -2108,18 +2479,34 @@ function AdminPortal() {
 
         {tab === "plans" && (
           <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <PrimaryButton onClick={() => setModal({ kind: "create", entity: "plan" })}>+ Add Plan</PrimaryButton>
+            </div>
             <Card style={{ marginBottom: 14 }}>
               <SectionLabel>Membership Plans</SectionLabel>
-              <AdminTable headers={["Plan", "Monthly", "Annual", "Active Members", "Status"]} rows={d.plans.map(p => [
-                p.name, "$" + Number(p.monthly_price).toFixed(0), "$" + Number(p.annual_price).toFixed(0),
-                activeMemberships.filter(m => m.maintenance_plan_id === p.id).length,
-                <Badge color="#2F5D34" bg="#E4EFDE">{p.is_active ? "Active" : "Inactive"}</Badge>,
-              ])} />
+              <AdminTable
+                headers={["Plan", "Monthly", "Annual", "Active Members", "Status"]}
+                rows={d.plans.map(p => [
+                  p.name, "$" + Number(p.monthly_price).toFixed(0), "$" + Number(p.annual_price).toFixed(0),
+                  activeMemberships.filter(m => m.maintenance_plan_id === p.id).length,
+                  <Badge color="#2F5D34" bg="#E4EFDE">{p.is_active ? "Active" : "Inactive"}</Badge>,
+                ])}
+                onEdit={(i) => setModal({ kind: "edit", entity: "plan", row: d.plans[i] })}
+                onDelete={(i) => setModal({ kind: "delete", entity: "plan", row: d.plans[i] })}
+              />
             </Card>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <PrimaryButton onClick={() => setModal({ kind: "create", entity: "promotion" })}>+ Add Promotion</PrimaryButton>
+            </div>
             <Card>
               <SectionLabel>Promotions</SectionLabel>
               {d.promotions.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>None active.</div>}
-              <AdminTable headers={["Title", "Ends", "Status"]} rows={d.promotions.map(p => [p.title, p.end_date, <Badge color="#2F5D34" bg="#E4EFDE">{p.is_active ? "Active" : "Inactive"}</Badge>])} />
+              <AdminTable
+                headers={["Title", "Ends", "Status"]}
+                rows={d.promotions.map(p => [p.title, p.end_date, <Badge color="#2F5D34" bg="#E4EFDE">{p.is_active ? "Active" : "Inactive"}</Badge>])}
+                onEdit={(i) => setModal({ kind: "edit", entity: "promotion", row: d.promotions[i] })}
+                onDelete={(i) => setModal({ kind: "delete", entity: "promotion", row: d.promotions[i] })}
+              />
             </Card>
           </>
         )}
@@ -2127,7 +2514,12 @@ function AdminPortal() {
         {tab === "technicians" && (
           <Card>
             {d.technicians.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No technicians yet.</div>}
-            <AdminTable headers={["Name", "Status"]} rows={d.technicians.map(t => [`${t.first_name} ${t.last_name}`, <Badge color={t.status === "available" ? "#2F5D34" : C.steel} bg={t.status === "available" ? "#E4EFDE" : "#E4EDF2"}>{humanize(t.status)}</Badge>])} />
+            <AdminTable
+              headers={["Name", "Status"]}
+              rows={d.technicians.map(t => [`${t.first_name} ${t.last_name}`, <Badge color={t.status === "available" ? "#2F5D34" : C.steel} bg={t.status === "available" ? "#E4EFDE" : "#E4EDF2"}>{humanize(t.status)}</Badge>])}
+              onEdit={(i) => setModal({ kind: "edit", entity: "technician", row: d.technicians[i] })}
+              onDelete={(i) => setModal({ kind: "delete", entity: "technician", row: d.technicians[i] })}
+            />
           </Card>
         )}
 
@@ -2167,6 +2559,41 @@ function AdminPortal() {
           </>
         )}
       </div>
+
+      {modal && modal.kind !== "delete" && (() => {
+        const spec = getEntitySpecs(d)[modal.entity];
+        const mode = modal.kind === "create" ? "create" : "edit";
+        return (
+          <EntityFormModal
+            title={`${mode === "create" ? "Add" : "Edit"} ${spec.label}`}
+            fields={spec.fields(mode)}
+            initial={modal.kind === "edit" ? modal.row : null}
+            onSave={saveEntity}
+            onClose={closeModal}
+            saving={modalBusy}
+            error={modalError}
+          />
+        );
+      })()}
+
+      {modal && modal.kind === "delete" && (() => {
+        const spec = getEntitySpecs(d)[modal.entity];
+        const name = spec.nameOf(modal.row);
+        const extraWarning = modal.entity === "customer"
+          ? " This also permanently deletes every property, service request, appointment, order, reminder, review, invoice, and note tied to this customer."
+          : "";
+        return (
+          <ConfirmDeleteModal
+            title={`Delete ${spec.label}?`}
+            message={`This will permanently delete "${name}".${extraWarning} This can't be undone.`}
+            requireText={modal.entity === "customer" ? name : null}
+            onConfirm={deleteEntity}
+            onClose={closeModal}
+            loading={modalBusy}
+            error={modalError}
+          />
+        );
+      })()}
     </div>
   );
 }
