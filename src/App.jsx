@@ -1817,13 +1817,35 @@ function KPI({ label, value, icon: Icon, accent, onClick }) {
   );
 }
 function AdminTable({ headers, rows }) {
+  const [selected, setSelected] = useState(null); // row index, or null
   return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: BODY, fontSize: 13 }}>
-        <thead><tr>{headers.map(h => <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: C.ash, fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.5, borderBottom: `1px solid ${C.line}` }}>{h}</th>)}</tr></thead>
-        <tbody>{rows.map((row, i) => <tr key={i}>{row.map((cell, j) => <td key={j} style={{ padding: "10px", borderBottom: `1px solid ${C.line}` }}>{cell}</td>)}</tr>)}</tbody>
-      </table>
-    </div>
+    <>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: BODY, fontSize: 13 }}>
+          <thead><tr>{headers.map(h => <th key={h} style={{ textAlign: "left", padding: "8px 10px", color: C.ash, fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.5, borderBottom: `1px solid ${C.line}` }}>{h}</th>)}</tr></thead>
+          <tbody>{rows.map((row, i) => (
+            <tr key={i} onClick={() => setSelected(i)} style={{ cursor: "pointer" }}>
+              {row.map((cell, j) => <td key={j} style={{ padding: "10px", borderBottom: `1px solid ${C.line}` }}>{cell}</td>)}
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      {selected !== null && rows[selected] && (
+        <div onClick={() => setSelected(null)} style={{ position: "fixed", inset: 0, background: "rgba(28,27,25,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, borderRadius: 16, padding: 20, maxWidth: 420, width: "100%", maxHeight: "80vh", overflowY: "auto", border: `1px solid ${C.line}` }}>
+            <div onClick={() => setSelected(null)} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", marginBottom: 14, color: C.terracotta, fontFamily: BODY, fontWeight: 700, fontSize: 13 }}>
+              <ChevronLeft size={18} /> Back
+            </div>
+            {headers.map((h, j) => (
+              <div key={h} style={{ padding: "9px 0", borderBottom: j < headers.length - 1 ? `1px solid ${C.line}` : "none" }}>
+                <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 3 }}>{h}</div>
+                <div style={{ fontFamily: BODY, fontSize: 15, color: C.ink }}>{rows[selected][j]}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -2006,7 +2028,7 @@ function AdminPortal() {
                 r.service_lines ? r.service_lines.label : "—", r.category,
                 <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>,
                 r.technicians ? `${r.technicians.first_name} ${r.technicians.last_name}` : "Unassigned",
-                <select onChange={(e) => e.target.value && assignTechnician(r.id, e.target.value)} defaultValue="" style={{ fontFamily: BODY, fontSize: 12, padding: 6, borderRadius: 8, border: `1px solid ${C.line}` }}>
+                <select onClick={(e) => e.stopPropagation()} onChange={(e) => e.target.value && assignTechnician(r.id, e.target.value)} defaultValue="" style={{ fontFamily: BODY, fontSize: 12, padding: 6, borderRadius: 8, border: `1px solid ${C.line}` }}>
                   <option value="">Assign…</option>
                   {d.technicians.map(t => <option key={t.id} value={t.id}>{t.first_name} {t.last_name}</option>)}
                 </select>,
@@ -2048,7 +2070,7 @@ function AdminPortal() {
                 (o.order_items || []).map(it => `${it.quantity} × ${it.products ? it.products.name : ""}`).join(", "),
                 <Badge color={sc.color} bg={sc.bg}>{humanize(o.status)}</Badge>,
                 <Badge>{humanize(o.billing_status)}</Badge>,
-                <GhostButton onClick={() => advanceOrderStatus(o)}>Advance</GhostButton>,
+                <GhostButton onClick={(e) => { e.stopPropagation(); advanceOrderStatus(o); }}>Advance</GhostButton>,
               ];
             })} />
           </Card>
