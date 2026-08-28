@@ -28,7 +28,14 @@ somewhere without that sandbox restriction — i.e., a real dev server — to ac
 - **Customer app**: sign up / log in, submit service requests (across 5 service lines), schedule
   appointments, order filters/supplies (no payment — billed to account separately), view
   equipment/service history/orders/reminders, browse and subscribe to membership plans
-- **Technician view**: log in, see assigned jobs only, advance job status, add notes
+- **Technician view**: a mobile-first, one-hand-usable CRM built around the technician's real
+  assigned jobs. Today's Jobs / Upcoming with one-tap Start Job, Call, and Directions; a job
+  screen surfacing the customer, address, problem, and the property's real equipment (with
+  add/edit) without leaving the job; fast quick-select Service Notes, Parts Used, and
+  Recommendation (tap tags, no forms); Photos (camera/gallery, auto-attached to the job);
+  Create Estimate and Follow-Up straight from the job; Complete Job with a one-tap outcome; My
+  Customers search and full Customer History; and an offline queue (IndexedDB) that saves notes,
+  photos, and status changes made with poor signal and syncs automatically once back online
 - **Admin portal**: log in, dashboard KPIs (including live MRR/ARR from real membership data),
   manage/assign service requests, advance orders, view customers/appointments/products/reminders/
   promotions/technicians, toggle business settings
@@ -102,10 +109,13 @@ Email → "Confirm email") for faster local testing.
 5. **Native mobile app** — this is a responsive web build. Shipping to the App Store / Google Play
    would mean porting the UI to React Native or Flutter; the Supabase data layer (REST calls in
    `src/App.jsx`) can mostly carry over as-is.
-6. **Admin/technician full CRUD** — some admin actions (creating new products, promotions,
-   technicians, editing membership plan pricing) are visible but not yet wired to insert/update
-   calls. Pattern to follow is already established in the file (see `assignTechnician`,
-   `advanceOrderStatus`, `toggleEmergency` in the `AdminPortal` component).
+6. ~~**Admin full CRUD**~~ — done. Admins can add/edit/delete across all main data sections
+   (customers, technicians, products, promotions, appointments, membership plans, etc.) via a
+   config-driven form system (`EntityFormModal`/`ConfirmDeleteModal`/`getEntitySpecs`).
+7. ~~**Technician CRM**~~ — done. See "Technician view" above. One deliberate scope cut: adding
+   equipment only supports typed fields, not photographing the equipment label — the job's
+   general Photos feature covers photo capture, it just isn't linked to a specific equipment row
+   yet.
 
 ## Project structure
 
