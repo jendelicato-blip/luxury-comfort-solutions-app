@@ -1817,6 +1817,12 @@ const TECHNICIAN_STATUS_OPTIONS = enumOptions(["available", "on_job", "off_duty"
 
 const emptyToNull = (v) => (v === "" || v === undefined ? null : v);
 const genNumber = (prefix) => `${prefix}-${Math.floor(10000 + Math.random() * 89999)}`;
+function generateTempPassword() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%";
+  let out = "";
+  for (let i = 0; i < 14; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
 function firstPropertyId(d, customerId) {
   const prop = d.properties.find((p) => p.customer_id === customerId);
   if (!prop) throw new Error("This customer has no property on file, so a request/appointment/order can't be created for them yet.");
@@ -2139,6 +2145,27 @@ function AdminPortal() {
   const [modalBusy, setModalBusy] = useState(false);
   const [modalError, setModalError] = useState(null);
   const closeModal = () => { setModal(null); setModalError(null); setModalBusy(false); };
+  const [inviteResult, setInviteResult] = useState(null); // { email, password } shown once after a successful invite
+
+  const inviteTechnician = async (form) => {
+    setModalBusy(true); setModalError(null);
+    try {
+      const password = generateTempPassword();
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/invite-technician`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ email: form.email, password, first_name: form.first_name, last_name: form.last_name, phone: form.phone || null }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || `Request failed (${res.status})`);
+      await loadAll(session.access_token);
+      closeModal();
+      setInviteResult({ email: form.email, password });
+    } catch (e) {
+      setModalError(e.message);
+      setModalBusy(false);
+    }
+  };
 
   const saveEntity = async (form) => {
     const spec = getEntitySpecs(d)[modal.entity];
@@ -2512,15 +2539,20 @@ function AdminPortal() {
         )}
 
         {tab === "technicians" && (
-          <Card>
-            {d.technicians.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No technicians yet.</div>}
-            <AdminTable
-              headers={["Name", "Status"]}
-              rows={d.technicians.map(t => [`${t.first_name} ${t.last_name}`, <Badge color={t.status === "available" ? "#2F5D34" : C.steel} bg={t.status === "available" ? "#E4EFDE" : "#E4EDF2"}>{humanize(t.status)}</Badge>])}
-              onEdit={(i) => setModal({ kind: "edit", entity: "technician", row: d.technicians[i] })}
-              onDelete={(i) => setModal({ kind: "delete", entity: "technician", row: d.technicians[i] })}
-            />
-          </Card>
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <PrimaryButton onClick={() => setModal({ kind: "invite", entity: "technician" })}>+ Invite Technician</PrimaryButton>
+            </div>
+            <Card>
+              {d.technicians.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No technicians yet.</div>}
+              <AdminTable
+                headers={["Name", "Status"]}
+                rows={d.technicians.map(t => [`${t.first_name} ${t.last_name}`, <Badge color={t.status === "available" ? "#2F5D34" : C.steel} bg={t.status === "available" ? "#E4EFDE" : "#E4EDF2"}>{humanize(t.status)}</Badge>])}
+                onEdit={(i) => setModal({ kind: "edit", entity: "technician", row: d.technicians[i] })}
+                onDelete={(i) => setModal({ kind: "delete", entity: "technician", row: d.technicians[i] })}
+              />
+            </Card>
+          </>
         )}
 
         {tab === "settings" && (
@@ -2560,7 +2592,7 @@ function AdminPortal() {
         )}
       </div>
 
-      {modal && modal.kind !== "delete" && (() => {
+      {modal && (modal.kind === "create" || modal.kind === "edit") && (() => {
         const spec = getEntitySpecs(d)[modal.entity];
         const mode = modal.kind === "create" ? "create" : "edit";
         return (
@@ -2575,6 +2607,37 @@ function AdminPortal() {
           />
         );
       })()}
+
+      {modal && modal.kind === "invite" && (
+        <EntityFormModal
+          title="Invite Technician"
+          fields={[
+            { key: "first_name", label: "First name", type: "text" },
+            { key: "last_name", label: "Last name", type: "text" },
+            { key: "email", label: "Email", type: "text" },
+            { key: "phone", label: "Phone", type: "text" },
+          ]}
+          initial={null}
+          onSave={inviteTechnician}
+          onClose={closeModal}
+          saving={modalBusy}
+          error={modalError}
+        />
+      )}
+
+      {inviteResult && (
+        <Modal onClose={() => setInviteResult(null)}>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17, marginBottom: 10, color: C.leaf }}>Technician account created</div>
+          <div style={{ fontFamily: BODY, fontSize: 13.5, marginBottom: 14, lineHeight: 1.5 }}>
+            Share these sign-in details with them directly — they won't be shown again. They can log in right away from the Technician tab.
+          </div>
+          <div style={{ background: C.cream, borderRadius: 10, padding: 12, marginBottom: 14, fontFamily: BODY, fontSize: 13.5 }}>
+            <div><b>Email:</b> {inviteResult.email}</div>
+            <div style={{ marginTop: 4 }}><b>Temporary password:</b> {inviteResult.password}</div>
+          </div>
+          <PrimaryButton full onClick={() => setInviteResult(null)}>Done</PrimaryButton>
+        </Modal>
+      )}
 
       {modal && modal.kind === "delete" && (() => {
         const spec = getEntitySpecs(d)[modal.entity];
