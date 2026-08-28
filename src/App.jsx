@@ -1795,9 +1795,9 @@ function TechnicianApp() {
 
 /* ============================= ADMIN PORTAL ============================= */
 
-function KPI({ label, value, icon: Icon, accent }) {
+function KPI({ label, value, icon: Icon, accent, onClick }) {
   return (
-    <Card style={{ flex: "1 1 150px" }}>
+    <Card onClick={onClick} style={{ flex: "1 1 150px", cursor: onClick ? "pointer" : "default" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
           <div style={{ fontFamily: BODY, fontSize: 11.5, color: C.ash, fontWeight: 600 }}>{label}</div>
@@ -1941,17 +1941,17 @@ function AdminPortal() {
         {tab === "dashboard" && (
           <>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <KPI label="Total Customers" value={d.customers.length} icon={Users} />
-              <KPI label="Open Requests" value={d.requests.filter(r => r.status !== "completed" && r.status !== "cancelled").length} icon={ClipboardList} accent={C.maple} />
-              <KPI label="Pending Appointments" value={d.appointments.filter(a => a.status === "requested").length} icon={CalendarDays} accent={C.steel} />
-              <KPI label="New Orders" value={d.orders.filter(o => o.status === "submitted").length} icon={Package} accent={C.leaf} />
-              <KPI label="Active Memberships" value={activeMemberships.length} icon={ShieldCheck} accent={C.gold} />
-              <KPI label="Reminders Due" value={d.reminders.filter(r => r.status !== "completed" && r.status !== "dismissed").length} icon={Bell} />
-              <KPI label="Monthly Recurring Revenue" value={"$" + mrr.toFixed(0)} icon={DollarSign} accent={C.leaf} />
-              <KPI label="Annual Recurring Revenue" value={"$" + arr.toFixed(0)} icon={DollarSign} accent={C.gold} />
+              <KPI label="Total Customers" value={d.customers.length} icon={Users} onClick={() => setTab("customers")} />
+              <KPI label="Open Requests" value={d.requests.filter(r => r.status !== "completed" && r.status !== "cancelled").length} icon={ClipboardList} accent={C.maple} onClick={() => setTab("requests")} />
+              <KPI label="Pending Appointments" value={d.appointments.filter(a => a.status === "requested").length} icon={CalendarDays} accent={C.steel} onClick={() => setTab("appointments")} />
+              <KPI label="New Orders" value={d.orders.filter(o => o.status === "submitted").length} icon={Package} accent={C.leaf} onClick={() => setTab("orders")} />
+              <KPI label="Active Memberships" value={activeMemberships.length} icon={ShieldCheck} accent={C.gold} onClick={() => setTab("plans")} />
+              <KPI label="Reminders Due" value={d.reminders.filter(r => r.status !== "completed" && r.status !== "dismissed").length} icon={Bell} onClick={() => setTab("reminders")} />
+              <KPI label="Monthly Recurring Revenue" value={"$" + mrr.toFixed(0)} icon={DollarSign} accent={C.leaf} onClick={() => setTab("plans")} />
+              <KPI label="Annual Recurring Revenue" value={"$" + arr.toFixed(0)} icon={DollarSign} accent={C.gold} onClick={() => setTab("plans")} />
             </div>
             <div style={{ display: "flex", gap: 14, marginTop: 20, flexWrap: "wrap" }}>
-              <Card style={{ flex: "1 1 260px" }}>
+              <Card onClick={() => setTab("plans")} style={{ flex: "1 1 260px", cursor: "pointer" }}>
                 <SectionLabel>Members by Tier</SectionLabel>
                 {membersByTier.map((t) => (
                   <div key={t.name} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontFamily: BODY, fontSize: 13.5 }}>
@@ -1959,7 +1959,7 @@ function AdminPortal() {
                   </div>
                 ))}
               </Card>
-              <Card style={{ flex: "1 1 260px" }}>
+              <Card onClick={() => setTab("plans")} style={{ flex: "1 1 260px", cursor: "pointer" }}>
                 <SectionLabel>Expiring / Cancelled Memberships</SectionLabel>
                 {expiringOrCancelled.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>None right now.</div>}
                 {expiringOrCancelled.map((m) => (
