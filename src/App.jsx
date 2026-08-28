@@ -654,16 +654,30 @@ function EmergencyScreen({ nav, emergencyEnabled }) {
 
 /* ============================= APPOINTMENTS ============================= */
 
-function ScheduleApptScreen({ nav, submit, navPayload }) {
-  const [form, setForm] = useState({ type: (navPayload && navPayload.type) || "Furnace Maintenance", date: "", window: "", notes: "" });
+function ScheduleApptScreen({ nav, submit, navPayload, serviceLines }) {
+  const initialType = (navPayload && navPayload.type) || "";
+  const [form, setForm] = useState({ type: initialType, date: "", window: "", notes: "" });
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const lines = serviceLines || [];
+  const knownOption = lines.some(line => (line.categories || []).includes(initialType));
+  const selectStyle = { width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, background: "#fff" };
+
   return (
     <div style={{ height: "100%", overflowY: "auto" }}>
       <AppBar title="Schedule Appointment" onBack={() => nav("home")} />
       <div style={{ padding: "0 18px 100px", display: "flex", flexDirection: "column", gap: 16 }}>
         <div>
           <SectionLabel>Service Type</SectionLabel>
-          <input value={form.type} onChange={e => set("type", e.target.value)} style={{ width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}` }} />
+          <select value={form.type} onChange={e => set("type", e.target.value)} style={selectStyle}>
+            <option value="">Select a service…</option>
+            {initialType && !knownOption && <option value={initialType}>{initialType}</option>}
+            {lines.map(line => (
+              <optgroup key={line.key} label={line.label}>
+                {(line.categories || []).map(c => <option key={c} value={c}>{c}</option>)}
+              </optgroup>
+            ))}
+          </select>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
           <div style={{ flex: 1 }}>
@@ -672,18 +686,18 @@ function ScheduleApptScreen({ nav, submit, navPayload }) {
           </div>
           <div style={{ flex: 1 }}>
             <SectionLabel>Preferred Window</SectionLabel>
-            <select value={form.window} onChange={e => set("window", e.target.value)} style={{ width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}` }}>
+            <select value={form.window} onChange={e => set("window", e.target.value)} style={selectStyle}>
               <option value="">Select</option>
               <option>8am – 12pm</option><option>12pm – 4pm</option><option>4pm – 6pm</option>
             </select>
           </div>
         </div>
         <div>
-          <SectionLabel>Notes</SectionLabel>
-          <textarea value={form.notes} onChange={e => set("notes", e.target.value)} rows={2} style={{ width: "100%", fontFamily: BODY, fontSize: 14, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, resize: "none" }} />
+          <SectionLabel>Comments</SectionLabel>
+          <textarea value={form.notes} onChange={e => set("notes", e.target.value)} rows={3} placeholder="Anything we should know before we come out?" style={{ width: "100%", fontFamily: BODY, fontSize: 14, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, resize: "none" }} />
         </div>
         <div style={{ fontFamily: BODY, fontSize: 11.5, color: C.ash }}>Appointment requests are subject to confirmation by Luxury Comfort Solutions.</div>
-        <PrimaryButton full onClick={() => submit(form)}>Request Appointment</PrimaryButton>
+        <PrimaryButton full disabled={!form.type} onClick={() => submit(form)}>Request Appointment</PrimaryButton>
       </div>
     </div>
   );
@@ -1612,7 +1626,7 @@ function CustomerApp() {
   else if (screen === "service" || screen === "newRequest") body = <NewRequestScreen nav={nav} submit={submitRequest} serviceLines={data.serviceLines} membershipInfo={{ plan: data.plan }} />;
   else if (screen === "requestConfirmed") body = <RequestConfirmed req={lastReq} nav={nav} />;
   else if (screen === "emergency") body = <EmergencyScreen nav={nav} emergencyEnabled={data.emergencyEnabled} />;
-  else if (screen === "scheduleAppt") body = <ScheduleApptScreen nav={nav} submit={submitAppt} navPayload={navPayload} />;
+  else if (screen === "scheduleAppt") body = <ScheduleApptScreen nav={nav} submit={submitAppt} navPayload={navPayload} serviceLines={data.serviceLines} />;
   else if (screen === "appointments") body = <AppointmentsScreen nav={nav} appointments={data.appointments} />;
   else if (screen === "orderFilters") body = <OrderFiltersScreen nav={nav} placeOrder={placeOrder} products={data.products} />;
   else if (screen === "orderConfirmed") body = <OrderConfirmed order={lastOrder} nav={nav} />;
