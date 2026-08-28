@@ -299,6 +299,14 @@ function Badge({ children, color = C.ink, bg = "#F1EBE0" }) {
 function SectionLabel({ children }) {
   return <div style={{ fontFamily: DISPLAY, fontSize: 13, letterSpacing: 1.5, textTransform: "uppercase", color: C.ash, marginBottom: 10 }}>{children}</div>;
 }
+function FilterChip({ label, onClear }) {
+  return (
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#F1EBE0", color: C.terracotta, borderRadius: 99, padding: "5px 10px 5px 12px", fontFamily: BODY, fontWeight: 700, fontSize: 12, marginBottom: 12 }}>
+      Filtered: {label}
+      <span onClick={onClear} style={{ cursor: "pointer", fontWeight: 700, padding: "0 2px" }}>✕</span>
+    </div>
+  );
+}
 function Card({ children, style, onClick }) {
   return <div onClick={onClick} style={{ background: C.paper, borderRadius: 16, padding: 16, border: `1px solid ${C.line}`, ...style }}>{children}</div>;
 }
@@ -1827,6 +1835,8 @@ function AdminPortal() {
   const [dataLoading, setDataLoading] = useState(false);
   const [tab, setTab] = useState("dashboard");
   const [d, setD] = useState(null); // all admin data
+  const [quickFilter, setQuickFilter] = useState(null); // { tab, predicate, label }
+  const goTo = (tabKey, filter) => { setTab(tabKey); setQuickFilter(filter || null); };
 
   const handleSignIn = async (email, password) => {
     setAuthLoading(true); setAuthError(null);
@@ -1926,7 +1936,7 @@ function AdminPortal() {
         <Logo width={128} />
         <div style={{ marginTop: 24, display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
           {tabs.map(t => (
-            <div key={t.key} onClick={() => setTab(t.key)} style={{ display: "flex", gap: 10, alignItems: "center", padding: "10px 10px", borderRadius: 10, cursor: "pointer", background: tab === t.key ? "#F1EBE0" : "transparent" }}>
+            <div key={t.key} onClick={() => goTo(t.key)} style={{ display: "flex", gap: 10, alignItems: "center", padding: "10px 10px", borderRadius: 10, cursor: "pointer", background: tab === t.key ? "#F1EBE0" : "transparent" }}>
               <t.icon size={16} color={tab === t.key ? C.terracotta : C.ash} />
               <span style={{ fontFamily: BODY, fontSize: 13, fontWeight: 600, color: tab === t.key ? C.ink : C.ash }}>{t.label}</span>
             </div>
@@ -1941,17 +1951,17 @@ function AdminPortal() {
         {tab === "dashboard" && (
           <>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <KPI label="Total Customers" value={d.customers.length} icon={Users} onClick={() => setTab("customers")} />
-              <KPI label="Open Requests" value={d.requests.filter(r => r.status !== "completed" && r.status !== "cancelled").length} icon={ClipboardList} accent={C.maple} onClick={() => setTab("requests")} />
-              <KPI label="Pending Appointments" value={d.appointments.filter(a => a.status === "requested").length} icon={CalendarDays} accent={C.steel} onClick={() => setTab("appointments")} />
-              <KPI label="New Orders" value={d.orders.filter(o => o.status === "submitted").length} icon={Package} accent={C.leaf} onClick={() => setTab("orders")} />
-              <KPI label="Active Memberships" value={activeMemberships.length} icon={ShieldCheck} accent={C.gold} onClick={() => setTab("plans")} />
-              <KPI label="Reminders Due" value={d.reminders.filter(r => r.status !== "completed" && r.status !== "dismissed").length} icon={Bell} onClick={() => setTab("reminders")} />
-              <KPI label="Monthly Recurring Revenue" value={"$" + mrr.toFixed(0)} icon={DollarSign} accent={C.leaf} onClick={() => setTab("plans")} />
-              <KPI label="Annual Recurring Revenue" value={"$" + arr.toFixed(0)} icon={DollarSign} accent={C.gold} onClick={() => setTab("plans")} />
+              <KPI label="Total Customers" value={d.customers.length} icon={Users} onClick={() => goTo("customers")} />
+              <KPI label="Open Requests" value={d.requests.filter(r => r.status !== "completed" && r.status !== "cancelled").length} icon={ClipboardList} accent={C.maple} onClick={() => goTo("requests", { tab: "requests", predicate: (r) => r.status !== "completed" && r.status !== "cancelled", label: "Open requests" })} />
+              <KPI label="Pending Appointments" value={d.appointments.filter(a => a.status === "requested").length} icon={CalendarDays} accent={C.steel} onClick={() => goTo("appointments", { tab: "appointments", predicate: (a) => a.status === "requested", label: "Pending appointments" })} />
+              <KPI label="New Orders" value={d.orders.filter(o => o.status === "submitted").length} icon={Package} accent={C.leaf} onClick={() => goTo("orders", { tab: "orders", predicate: (o) => o.status === "submitted", label: "New orders" })} />
+              <KPI label="Active Memberships" value={activeMemberships.length} icon={ShieldCheck} accent={C.gold} onClick={() => goTo("plans")} />
+              <KPI label="Reminders Due" value={d.reminders.filter(r => r.status !== "completed" && r.status !== "dismissed").length} icon={Bell} onClick={() => goTo("reminders", { tab: "reminders", predicate: (r) => r.status !== "completed" && r.status !== "dismissed", label: "Reminders due" })} />
+              <KPI label="Monthly Recurring Revenue" value={"$" + mrr.toFixed(0)} icon={DollarSign} accent={C.leaf} onClick={() => goTo("plans")} />
+              <KPI label="Annual Recurring Revenue" value={"$" + arr.toFixed(0)} icon={DollarSign} accent={C.gold} onClick={() => goTo("plans")} />
             </div>
             <div style={{ display: "flex", gap: 14, marginTop: 20, flexWrap: "wrap" }}>
-              <Card onClick={() => setTab("plans")} style={{ flex: "1 1 260px", cursor: "pointer" }}>
+              <Card onClick={() => goTo("plans")} style={{ flex: "1 1 260px", cursor: "pointer" }}>
                 <SectionLabel>Members by Tier</SectionLabel>
                 {membersByTier.map((t) => (
                   <div key={t.name} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", fontFamily: BODY, fontSize: 13.5 }}>
@@ -1959,7 +1969,7 @@ function AdminPortal() {
                   </div>
                 ))}
               </Card>
-              <Card onClick={() => setTab("plans")} style={{ flex: "1 1 260px", cursor: "pointer" }}>
+              <Card onClick={() => goTo("plans")} style={{ flex: "1 1 260px", cursor: "pointer" }}>
                 <SectionLabel>Expiring / Cancelled Memberships</SectionLabel>
                 {expiringOrCancelled.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>None right now.</div>}
                 {expiringOrCancelled.map((m) => (
@@ -1982,10 +1992,14 @@ function AdminPortal() {
           </Card>
         )}
 
-        {tab === "requests" && (
+        {tab === "requests" && (() => {
+          const activeFilter = quickFilter && quickFilter.tab === "requests" ? quickFilter : null;
+          const list = activeFilter ? d.requests.filter(activeFilter.predicate) : d.requests;
+          return (
           <Card>
-            {d.requests.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No service requests yet.</div>}
-            <AdminTable headers={["Request #", "Customer", "Service", "Category", "Status", "Technician", "Assign"]} rows={d.requests.map(r => {
+            {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
+            {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No requests match this filter." : "No service requests yet."}</div>}
+            <AdminTable headers={["Request #", "Customer", "Service", "Category", "Status", "Technician", "Assign"]} rows={list.map(r => {
               const sc = statusColor(humanize(r.status));
               return [
                 r.request_number, r.customers ? `${r.customers.first_name} ${r.customers.last_name}` : "—",
@@ -1999,12 +2013,17 @@ function AdminPortal() {
               ];
             })} />
           </Card>
-        )}
+          );
+        })()}
 
-        {tab === "appointments" && (
+        {tab === "appointments" && (() => {
+          const activeFilter = quickFilter && quickFilter.tab === "appointments" ? quickFilter : null;
+          const list = activeFilter ? d.appointments.filter(activeFilter.predicate) : d.appointments;
+          return (
           <Card>
-            {d.appointments.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No appointments yet.</div>}
-            <AdminTable headers={["Appt #", "Customer", "Type", "Date", "Window", "Technician", "Status"]} rows={d.appointments.map(a => {
+            {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
+            {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No appointments match this filter." : "No appointments yet."}</div>}
+            <AdminTable headers={["Appt #", "Customer", "Type", "Date", "Window", "Technician", "Status"]} rows={list.map(a => {
               const sc = statusColor(humanize(a.status));
               return [a.appointment_number, a.customers ? `${a.customers.first_name} ${a.customers.last_name}` : "—", a.appointment_type, a.scheduled_date || "—", a.scheduled_window || "—", a.technicians ? `${a.technicians.first_name} ${a.technicians.last_name}` : "Unassigned", <Badge color={sc.color} bg={sc.bg}>{humanize(a.status)}</Badge>];
             })} />
@@ -2012,12 +2031,17 @@ function AdminPortal() {
               <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>Business hours, time windows, and technician availability are configured under Settings.</div>
             </div>
           </Card>
-        )}
+          );
+        })()}
 
-        {tab === "orders" && (
+        {tab === "orders" && (() => {
+          const activeFilter = quickFilter && quickFilter.tab === "orders" ? quickFilter : null;
+          const list = activeFilter ? d.orders.filter(activeFilter.predicate) : d.orders;
+          return (
           <Card>
-            {d.orders.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No orders yet.</div>}
-            <AdminTable headers={["Order #", "Customer", "Items", "Status", "Billing", "Action"]} rows={d.orders.map(o => {
+            {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
+            {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No orders match this filter." : "No orders yet."}</div>}
+            <AdminTable headers={["Order #", "Customer", "Items", "Status", "Billing", "Action"]} rows={list.map(o => {
               const sc = statusColor(humanize(o.status));
               return [
                 o.order_number, o.customers ? `${o.customers.first_name} ${o.customers.last_name}` : "—",
@@ -2028,7 +2052,8 @@ function AdminPortal() {
               ];
             })} />
           </Card>
-        )}
+          );
+        })()}
 
         {tab === "products" && (
           <Card>
@@ -2037,7 +2062,10 @@ function AdminPortal() {
           </Card>
         )}
 
-        {tab === "reminders" && (
+        {tab === "reminders" && (() => {
+          const activeFilter = quickFilter && quickFilter.tab === "reminders" ? quickFilter : null;
+          const list = activeFilter ? d.reminders.filter(activeFilter.predicate) : d.reminders;
+          return (
           <>
             <Card style={{ marginBottom: 14 }}>
               <SectionLabel>Reminder Templates (configurable intervals)</SectionLabel>
@@ -2045,14 +2073,16 @@ function AdminPortal() {
             </Card>
             <Card>
               <SectionLabel>Active Reminders</SectionLabel>
-              {d.reminders.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>None yet.</div>}
-              <AdminTable headers={["Type", "Customer", "Due", "Status"]} rows={d.reminders.map(r => {
+              {activeFilter && <FilterChip label={activeFilter.label} onClear={() => setQuickFilter(null)} />}
+              {list.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{activeFilter ? "No reminders match this filter." : "None yet."}</div>}
+              <AdminTable headers={["Type", "Customer", "Due", "Status"]} rows={list.map(r => {
                 const sc = statusColor(humanize(r.status));
                 return [humanize(r.reminder_type), r.customers ? `${r.customers.first_name} ${r.customers.last_name}` : "—", r.due_date, <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>];
               })} />
             </Card>
           </>
-        )}
+          );
+        })()}
 
         {tab === "plans" && (
           <>
