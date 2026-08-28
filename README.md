@@ -88,13 +88,14 @@ Email → "Confirm email") for faster local testing.
 2. **Stripe billing** — membership pricing is illustrative only; no payment is actually processed.
    This needs a secure backend endpoint (e.g. a Supabase Edge Function) holding the Stripe secret
    key — never put a Stripe secret key in this frontend code.
-3. ~~**Staff account provisioning**~~ — partially done. Admins can now invite a **technician**
-   from Admin Portal → Technicians → "+ Invite Technician": it calls a Supabase Edge Function
-   (`invite-technician`) that verifies the caller is an admin, then uses the service-role key
-   server-side (never exposed to the frontend) to create the auth account. A one-time-shown
-   temporary password is generated for the admin to hand off. **Admin account creation is still
-   SQL-only** — there's no invite-admin flow yet (would need the same pattern, gated even more
-   carefully since it grants full access).
+3. ~~**Staff account provisioning**~~ — done. Admins can invite a **technician** (Admin Portal →
+   Technicians → "+ Invite Technician") or another **admin** (Admin Portal → Settings →
+   Administrators → "+ Invite Admin"). Both call a Supabase Edge Function
+   (`invite-technician` / `invite-admin`) that verifies the caller is already an admin, then uses
+   the service-role key server-side (never exposed to the frontend) to create the auth account.
+   Inviting an admin additionally requires typing an exact confirmation phrase and is written to
+   `audit_log`, since it grants full access to everything. A one-time-shown temporary password is
+   generated for the admin to hand off to the new user directly.
 4. **Push notifications, email/SMS** — not implemented. Would need Firebase Cloud Messaging /
    APNs for push, and a provider like Twilio/SendGrid for SMS/email, triggered from a backend
    (e.g. Supabase Edge Functions responding to database changes).

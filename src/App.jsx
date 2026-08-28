@@ -2145,7 +2145,7 @@ function AdminPortal() {
   const [modalBusy, setModalBusy] = useState(false);
   const [modalError, setModalError] = useState(null);
   const closeModal = () => { setModal(null); setModalError(null); setModalBusy(false); };
-  const [inviteResult, setInviteResult] = useState(null); // { email, password } shown once after a successful invite
+  const [inviteResult, setInviteResult] = useState(null); // { role, email, password } shown once after a successful invite
 
   const inviteTechnician = async (form) => {
     setModalBusy(true); setModalError(null);
@@ -2160,7 +2160,32 @@ function AdminPortal() {
       if (!res.ok) throw new Error(json.error || `Request failed (${res.status})`);
       await loadAll(session.access_token);
       closeModal();
-      setInviteResult({ email: form.email, password });
+      setInviteResult({ role: "Technician", email: form.email, password });
+    } catch (e) {
+      setModalError(e.message);
+      setModalBusy(false);
+    }
+  };
+
+  const inviteAdmin = async (form) => {
+    setModalBusy(true); setModalError(null);
+    if (form.confirm !== "INVITE ADMIN") {
+      setModalError('Type "INVITE ADMIN" exactly to confirm — this grants full access to everything.');
+      setModalBusy(false);
+      return;
+    }
+    try {
+      const password = generateTempPassword();
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/invite-admin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ email: form.email, password, first_name: form.first_name, last_name: form.last_name, confirm: form.confirm }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || `Request failed (${res.status})`);
+      await loadAll(session.access_token);
+      closeModal();
+      setInviteResult({ role: "Admin", email: form.email, password });
     } catch (e) {
       setModalError(e.message);
       setModalBusy(false);
@@ -2221,7 +2246,7 @@ function AdminPortal() {
   const loadAll = async (token) => {
     setDataLoading(true);
     try {
-      const [customers, requests, appointments, orders, products, reminders, reminderTemplates, plans, memberships, promos, technicians, settingsRows, properties, serviceLines, productCategories] = await Promise.all([
+      const [customers, requests, appointments, orders, products, reminders, reminderTemplates, plans, memberships, promos, technicians, settingsRows, properties, serviceLines, productCategories, administrators] = await Promise.all([
         restRequest(`customers?select=*&order=created_at.desc`, { token }),
         restRequest(`service_requests?select=*,customers(first_name,last_name),service_lines(label),technicians(first_name,last_name)&order=created_at.desc`, { token }),
         restRequest(`appointments?select=*,customers(first_name,last_name),technicians(first_name,last_name)&order=scheduled_date.asc.nullslast`, { token }),
@@ -2237,10 +2262,11 @@ function AdminPortal() {
         restRequest(`properties?select=id,customer_id,address_line1&order=is_primary.desc`, { token }),
         restRequest(`service_lines?select=id,key,label&order=sort_order.asc`, { token }),
         restRequest(`product_categories?select=id,name&order=sort_order.asc`, { token }),
+        restRequest(`administrators?select=id,first_name,last_name&order=created_at.asc`, { token }),
       ]);
       setD({
         customers, requests, appointments, orders, products, reminders, reminderTemplates,
-        plans, memberships, promotions: promos, technicians, properties, serviceLines, productCategories,
+        plans, memberships, promotions: promos, technicians, properties, serviceLines, productCategories, administrators,
         settings: Object.fromEntries(settingsRows.map((s) => [s.key, s.value])),
       });
     } finally {
@@ -2569,6 +2595,17 @@ function AdminPortal() {
             </Card>
 
             <Card style={{ marginBottom: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <SectionLabel>Administrators</SectionLabel>
+                <PrimaryButton onClick={() => setModal({ kind: "invite-admin" })}>+ Invite Admin</PrimaryButton>
+              </div>
+              {d.administrators.map((a) => (
+                <div key={a.id} style={{ fontFamily: BODY, fontSize: 13.5, padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>{a.first_name} {a.last_name}</div>
+              ))}
+              <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, marginTop: 8 }}>Grants full access to everything — invite carefully.</div>
+            </Card>
+
+            <Card style={{ marginBottom: 14 }}>
               <SectionLabel>Service Area</SectionLabel>
               <div style={{ fontFamily: BODY, fontSize: 13.5 }}>{(d.settings.service_area || []).join(", ")}, and surrounding communities</div>
             </Card>
@@ -2625,11 +2662,28 @@ function AdminPortal() {
         />
       )}
 
+      {modal && modal.kind === "invite-admin" && (
+        <EntityFormModal
+          title="Invite Admin"
+          fields={[
+            { key: "first_name", label: "First name", type: "text" },
+            { key: "last_name", label: "Last name", type: "text" },
+            { key: "email", label: "Email", type: "text" },
+            { key: "confirm", label: "Type INVITE ADMIN to confirm", type: "text", hint: "This grants full access to everything — customers, billing status, every setting." },
+          ]}
+          initial={null}
+          onSave={inviteAdmin}
+          onClose={closeModal}
+          saving={modalBusy}
+          error={modalError}
+        />
+      )}
+
       {inviteResult && (
         <Modal onClose={() => setInviteResult(null)}>
-          <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17, marginBottom: 10, color: C.leaf }}>Technician account created</div>
+          <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17, marginBottom: 10, color: C.leaf }}>{inviteResult.role} account created</div>
           <div style={{ fontFamily: BODY, fontSize: 13.5, marginBottom: 14, lineHeight: 1.5 }}>
-            Share these sign-in details with them directly — they won't be shown again. They can log in right away from the Technician tab.
+            Share these sign-in details with them directly — they won't be shown again.
           </div>
           <div style={{ background: C.cream, borderRadius: 10, padding: 12, marginBottom: 14, fontFamily: BODY, fontSize: 13.5 }}>
             <div><b>Email:</b> {inviteResult.email}</div>
