@@ -198,15 +198,29 @@ async function queueWrite(action) {
   }
 }
 
-// Insert one or more rows. Tries the network immediately; if offline or the request fails,
-// queues the insert (with an upsert Prefer header so a later retry can't create a duplicate)
-// and returns the row(s) as given so the caller can update local state optimistically.
+// fetch() itself throws a TypeError when the request can't even be made (offline, DNS,
+// connection refused). A server that actually responded with an error status surfaces here as a
+// plain Error instead (see restRequest) — that's a real rejection retrying won't fix, not a
+// connectivity problem, so it must never be queued as if it were one.
+function isNetworkFailure(e) {
+  return e instanceof TypeError;
+}
+
+// Insert one or more rows. Tries the network immediately; if offline or the request can't reach
+// the server, queues the insert (with an upsert Prefer header so a later retry can't create a
+// duplicate) and returns the row(s) as given so the caller can update local state optimistically.
+// A genuine server rejection (bad data, permission) is thrown back to the caller instead of
+// silently queued, since retrying it would never succeed.
 async function writeRow(table, row, { token, upsert = true } = {}) {
   const prefer = upsert ? "return=representation,resolution=merge-duplicates" : "return=representation";
+  if (!navigator.onLine) {
+    await queueWrite({ kind: "rest", path: table, method: "POST", body: [row], token, prefer });
+    return [row];
+  }
   try {
-    if (!navigator.onLine) throw new Error("offline");
     return await restRequest(table, { method: "POST", token, body: [row], prefer });
-  } catch {
+  } catch (e) {
+    if (!isNetworkFailure(e)) throw e;
     await queueWrite({ kind: "rest", path: table, method: "POST", body: [row], token, prefer });
     return [row];
   }
@@ -216,33 +230,39 @@ async function writeRow(table, row, { token, upsert = true } = {}) {
 // to the same end state, so a queued retry is always safe.
 async function patchRow(table, matchQuery, patch, { token } = {}) {
   const path = `${table}?${matchQuery}`;
+  if (!navigator.onLine) {
+    await queueWrite({ kind: "rest", path, method: "PATCH", body: patch, token, prefer: "return=representation" });
+    return [patch];
+  }
   try {
-    if (!navigator.onLine) throw new Error("offline");
     return await restRequest(path, { method: "PATCH", token, body: patch, prefer: "return=representation" });
-  } catch {
+  } catch (e) {
+    if (!isNetworkFailure(e)) throw e;
     await queueWrite({ kind: "rest", path, method: "PATCH", body: patch, token, prefer: "return=representation" });
     return [patch];
   }
 }
 
 // Uploads a photo (job-photos/<serviceRequestId>/<filename>) then inserts its attachments row.
-// Offline (or on failure), the raw file and the pending attachments row are queued together so
-// the upload and the row insert always happen as one unit when connectivity returns.
+// Offline (or on a network failure), the raw file and the pending attachments row are queued
+// together so the upload and the row insert always happen as one unit when connectivity returns.
 async function uploadJobPhoto(serviceRequestId, file, attachmentRow, token) {
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${(file.type.split("/")[1] || "jpg")}`;
   const path = `${serviceRequestId}/${filename}`;
+  const queueIt = () => queueWrite({ kind: "photo", path, fileBlob: file, fileType: file.type || "image/jpeg", attachmentRow: { ...attachmentRow, file_url: path }, token });
+  if (!navigator.onLine) { await queueIt(); return path; }
   try {
-    if (!navigator.onLine) throw new Error("offline");
     const res = await fetch(`${SUPABASE_URL}/storage/v1/object/job-photos/${path}`, {
       method: "POST",
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": file.type || "image/jpeg" },
       body: file,
     });
-    if (!res.ok) throw new Error("Upload failed");
+    if (!res.ok) throw new Error(`Upload failed (${res.status})`);
     await restRequest("attachments", { method: "POST", token, body: [{ ...attachmentRow, file_url: path }], prefer: "return=representation" });
     return path;
-  } catch {
-    await queueWrite({ kind: "photo", path, fileBlob: file, fileType: file.type || "image/jpeg", attachmentRow: { ...attachmentRow, file_url: path }, token });
+  } catch (e) {
+    if (!isNetworkFailure(e)) throw e;
+    await queueIt();
     return path;
   }
 }
@@ -262,28 +282,35 @@ async function getSignedPhotoUrl(path, token) {
   }
 }
 
-// Replays every queued write in order, stopping at the first failure (still offline, or a
-// transient error) so remaining items retry cleanly next time rather than replaying out of order.
-async function flushOutbox() {
+// Replays every queued write in order. Stops at the first still-offline/network failure so the
+// remaining items retry cleanly as a batch later. A genuine server rejection (e.g. the queued
+// item's access token expired since it was written, or the data is now invalid) is dropped
+// instead of retried forever — otherwise one permanently-bad item would jam every item behind it
+// in the queue indefinitely. `freshToken`, when given, replaces each item's own (possibly
+// stale/expired) captured token, since an item can easily sit queued past a token's ~1hr expiry.
+async function flushOutbox(freshToken) {
   const items = await outboxAll();
   let flushed = 0;
   for (const item of items) {
+    const token = freshToken || item.token;
     try {
       if (item.kind === "photo") {
         const res = await fetch(`${SUPABASE_URL}/storage/v1/object/job-photos/${item.path}`, {
           method: "POST",
-          headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${item.token}`, "Content-Type": item.fileType },
+          headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": item.fileType },
           body: item.fileBlob,
         });
-        if (!res.ok && res.status !== 409) throw new Error("Upload failed");
-        await restRequest("attachments", { method: "POST", token: item.token, body: [item.attachmentRow], prefer: "return=representation,resolution=merge-duplicates" });
+        if (!res.ok && res.status !== 409) throw new Error(`Upload failed (${res.status})`);
+        await restRequest("attachments", { method: "POST", token, body: [item.attachmentRow], prefer: "return=representation,resolution=merge-duplicates" });
       } else {
-        await restRequest(item.path, { method: item.method, token: item.token, body: item.body, prefer: item.prefer });
+        await restRequest(item.path, { method: item.method, token, body: item.body, prefer: item.prefer });
       }
       await outboxDelete(item.key);
       flushed++;
-    } catch {
-      break;
+    } catch (e) {
+      if (isNetworkFailure(e)) break;
+      console.warn("Dropping a queued sync item that can never succeed:", item, e);
+      await outboxDelete(item.key);
     }
   }
   return flushed;
@@ -2105,6 +2132,8 @@ function PartsModal({ job, session, ensureRecord, onClose }) {
         setRecordId(record.id);
         const rows = await restRequest(`service_record_line_items?service_record_id=eq.${record.id}&line_type=eq.part&order=created_at.asc`, { token: session.access_token }).catch(() => []);
         setParts(rows || []);
+      } catch (e) {
+        setError(e.message);
       } finally {
         setLoading(false);
       }
@@ -2292,6 +2321,7 @@ function PhotosModal({ job, session, ensureRecord, onClose }) {
   const [photos, setPhotos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState(null);
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -2302,6 +2332,8 @@ function PhotosModal({ job, session, ensureRecord, onClose }) {
         const rows = await restRequest(`attachments?related_entity_type=eq.service_record&related_entity_id=eq.${rec.id}&order=created_at.desc`, { token: session.access_token }).catch(() => []);
         const withUrls = await Promise.all((rows || []).map(async (r) => ({ id: r.id, url: await getSignedPhotoUrl(r.file_url, session.access_token), pending: false })));
         setPhotos(withUrls);
+      } catch (e) {
+        setError(e.message);
       } finally {
         setLoading(false);
       }
@@ -2311,7 +2343,7 @@ function PhotosModal({ job, session, ensureRecord, onClose }) {
   const handleFiles = async (e) => {
     const files = Array.from(e.target.files || []);
     if (!files.length || !record) return;
-    setUploading(true);
+    setUploading(true); setError(null);
     for (const file of files) {
       const localId = crypto.randomUUID();
       setPhotos((p) => [{ id: localId, url: URL.createObjectURL(file), pending: true }, ...p]);
@@ -2319,8 +2351,13 @@ function PhotosModal({ job, session, ensureRecord, onClose }) {
         id: crypto.randomUUID(), uploaded_by_user_id: session.user.id,
         related_entity_type: "service_record", related_entity_id: record.id, file_type: file.type || "image/jpeg",
       };
-      await uploadJobPhoto(job.id, file, attachmentRow, session.access_token);
-      setPhotos((p) => p.map((ph) => (ph.id === localId ? { ...ph, pending: !navigator.onLine } : ph)));
+      try {
+        await uploadJobPhoto(job.id, file, attachmentRow, session.access_token);
+        setPhotos((p) => p.map((ph) => (ph.id === localId ? { ...ph, pending: !navigator.onLine } : ph)));
+      } catch (err) {
+        setError(err.message);
+        setPhotos((p) => p.map((ph) => (ph.id === localId ? { ...ph, pending: false, failed: true } : ph)));
+      }
     }
     setUploading(false);
     if (fileRef.current) fileRef.current.value = "";
@@ -2333,6 +2370,7 @@ function PhotosModal({ job, session, ensureRecord, onClose }) {
         <>
           <input ref={fileRef} type="file" accept="image/*" capture="environment" multiple onChange={handleFiles} style={{ display: "none" }} />
           <PrimaryButton full onClick={() => fileRef.current?.click()}>{uploading ? "Uploading…" : "📸 Take / Add Photo"}</PrimaryButton>
+          {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 14 }}>
             {photos.map((p) => (
               <div key={p.id} style={{ position: "relative", aspectRatio: "1", borderRadius: 10, overflow: "hidden", background: "#F1EBE0" }}>
@@ -2340,6 +2378,11 @@ function PhotosModal({ job, session, ensureRecord, onClose }) {
                 {p.pending && (
                   <div style={{ position: "absolute", bottom: 4, left: 4, right: 4, background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 9.5, fontFamily: BODY, fontWeight: 700, borderRadius: 6, padding: "2px 5px", textAlign: "center" }}>
                     Waiting to sync
+                  </div>
+                )}
+                {p.failed && (
+                  <div style={{ position: "absolute", bottom: 4, left: 4, right: 4, background: "rgba(140,45,45,0.85)", color: "#fff", fontSize: 9.5, fontFamily: BODY, fontWeight: 700, borderRadius: 6, padding: "2px 5px", textAlign: "center" }}>
+                    Upload failed
                   </div>
                 )}
               </div>
@@ -2666,16 +2709,18 @@ function TechnicianApp() {
   const [online, setOnline] = useState(navigator.onLine);
   const [pending, setPending] = useState(0);
   const serviceRecordCache = useRef({});
+  const sessionRef = useRef(null);
+  useEffect(() => { sessionRef.current = session; }, [session]);
 
   const refreshPending = () => outboxAll().then((l) => setPending(l.length));
 
   useEffect(() => {
-    const goOnline = () => { setOnline(true); flushOutbox().then(refreshPending); };
+    const goOnline = () => { setOnline(true); flushOutbox(sessionRef.current?.access_token).then(refreshPending); };
     const goOffline = () => setOnline(false);
     window.addEventListener("online", goOnline);
     window.addEventListener("offline", goOffline);
     refreshPending();
-    const interval = setInterval(() => { if (navigator.onLine) flushOutbox().then(refreshPending); }, 45000);
+    const interval = setInterval(() => { if (navigator.onLine) flushOutbox(sessionRef.current?.access_token).then(refreshPending); }, 45000);
     return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); clearInterval(interval); };
   }, []);
 
@@ -2736,19 +2781,27 @@ function TechnicianApp() {
 
   const startJob = async (job) => {
     if (["in_progress", "completed"].includes(job.status)) return;
-    const [updated] = await patchRow("service_requests", `id=eq.${job.id}`, { status: "in_progress" }, { token: session.access_token });
-    setJobs((js) => js.map((j) => (j.id === job.id ? { ...j, ...updated, status: "in_progress" } : j)));
-    getRecord(job).catch(() => {});
-    refreshPending();
+    try {
+      const [updated] = await patchRow("service_requests", `id=eq.${job.id}`, { status: "in_progress" }, { token: session.access_token });
+      setJobs((js) => js.map((j) => (j.id === job.id ? { ...j, ...updated, status: "in_progress" } : j)));
+      getRecord(job).catch(() => {});
+      refreshPending();
+    } catch (e) {
+      alert(`Couldn't start the job: ${e.message}`);
+    }
   };
 
   // Lets a technician back out of an accidental Start Job tap. Puts the job back to
   // "technician_assigned" — anything already saved (notes, photos, parts) is untouched.
   const undoStart = async (job) => {
     if (job.status !== "in_progress") return;
-    const [updated] = await patchRow("service_requests", `id=eq.${job.id}`, { status: "technician_assigned" }, { token: session.access_token });
-    setJobs((js) => js.map((j) => (j.id === job.id ? { ...j, ...updated, status: "technician_assigned" } : j)));
-    refreshPending();
+    try {
+      const [updated] = await patchRow("service_requests", `id=eq.${job.id}`, { status: "technician_assigned" }, { token: session.access_token });
+      setJobs((js) => js.map((j) => (j.id === job.id ? { ...j, ...updated, status: "technician_assigned" } : j)));
+      refreshPending();
+    } catch (e) {
+      alert(`Couldn't undo: ${e.message}`);
+    }
   };
 
   const call = (phone) => { if (phone) window.location.href = `tel:${phone}`; };
@@ -2843,7 +2896,7 @@ function TechnicianApp() {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: C.cream }}>
-      <SyncPill pending={pending} online={online} onSync={() => flushOutbox().then(refreshPending)} />
+      <SyncPill pending={pending} online={online} onSync={() => flushOutbox(session.access_token).then(refreshPending)} />
       <div style={{ flex: 1, overflow: "hidden" }}>{body}</div>
       {modalsHost}
       <div style={{ display: "flex", borderTop: `1px solid ${C.line}`, background: "#fff" }}>
