@@ -243,16 +243,18 @@ async function patchRow(table, matchQuery, patch, { token } = {}) {
   }
 }
 
-// Uploads a photo (job-photos/<serviceRequestId>/<filename>) then inserts its attachments row.
-// Offline (or on a network failure), the raw file and the pending attachments row are queued
-// together so the upload and the row insert always happen as one unit when connectivity returns.
-async function uploadJobPhoto(serviceRequestId, file, attachmentRow, token) {
+// Uploads a file (<bucket>/<folderKey>/<filename>) then inserts its attachments row. Offline (or
+// on a network failure), the raw file and the pending attachments row are queued together so the
+// upload and the row insert always happen as one unit when connectivity returns. `bucket`
+// defaults to job-photos (technician job photos); property document uploads pass
+// "property-documents" so both share the same offline-safe upload/queue/flush machinery.
+async function uploadJobPhoto(folderKey, file, attachmentRow, token, bucket = "job-photos") {
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${(file.type.split("/")[1] || "jpg")}`;
-  const path = `${serviceRequestId}/${filename}`;
-  const queueIt = () => queueWrite({ kind: "photo", path, fileBlob: file, fileType: file.type || "image/jpeg", attachmentRow: { ...attachmentRow, file_url: path }, token });
+  const path = `${folderKey}/${filename}`;
+  const queueIt = () => queueWrite({ kind: "photo", bucket, path, fileBlob: file, fileType: file.type || "image/jpeg", attachmentRow: { ...attachmentRow, file_url: path }, token });
   if (!navigator.onLine) { await queueIt(); return path; }
   try {
-    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/job-photos/${path}`, {
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path}`, {
       method: "POST",
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": file.type || "image/jpeg" },
       body: file,
@@ -267,9 +269,9 @@ async function uploadJobPhoto(serviceRequestId, file, attachmentRow, token) {
   }
 }
 
-async function getSignedPhotoUrl(path, token) {
+async function getSignedPhotoUrl(path, token, bucket = "job-photos") {
   try {
-    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/job-photos/${path}`, {
+    const res = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${bucket}/${path}`, {
       method: "POST",
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ expiresIn: 3600 }),
@@ -295,7 +297,7 @@ async function flushOutbox(freshToken) {
     const token = freshToken || item.token;
     try {
       if (item.kind === "photo") {
-        const res = await fetch(`${SUPABASE_URL}/storage/v1/object/job-photos/${item.path}`, {
+        const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${item.bucket || "job-photos"}/${item.path}`, {
           method: "POST",
           headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": item.fileType },
           body: item.fileBlob,
@@ -1982,7 +1984,7 @@ function JobCard({ job, onOpen, onStart, onCall, onDirections }) {
   );
 }
 
-function JobScreen({ job, equipmentByProperty, onBack, onStart, onUndoStart, onCall, onText, onDirections, onOpenModal, onOpenHistory }) {
+function JobScreen({ job, equipmentByProperty, onBack, onStart, onUndoStart, onCall, onText, onDirections, onOpenModal, onOpenHistory, onOpenPropertyProfile }) {
   const sc = statusColor(humanize(job.status));
   const Icon = serviceLineIcon(job.service_lines ? job.service_lines.key : null);
   const inProgress = job.status === "in_progress";
@@ -2065,6 +2067,7 @@ function JobScreen({ job, equipmentByProperty, onBack, onStart, onUndoStart, onC
             <BigActionButton label="💰 Create Estimate" sub="Send pricing to the customer" onClick={() => onOpenModal("estimate")} />
             <BigActionButton label="📅 Follow-Up" sub="Schedule a reminder" onClick={() => onOpenModal("followup")} />
             <BigActionButton label="📖 Customer History" sub="Past service at this address" onClick={() => onOpenHistory(job.customer_id, `${job.customers.first_name} ${job.customers.last_name}`)} />
+            <BigActionButton label="🏠 Property Profile" sub="Home systems, records & inspection" onClick={() => onOpenPropertyProfile(job)} />
           </div>
         </div>
 
@@ -2705,6 +2708,7 @@ function TechnicianApp() {
   const [openCustomerId, setOpenCustomerId] = useState(null);
   const [historyFor, setHistoryFor] = useState(null);
   const [modal, setModal] = useState(null);
+  const [propertyProfileId, setPropertyProfileId] = useState(null);
 
   const [online, setOnline] = useState(navigator.onLine);
   const [pending, setPending] = useState(0);
@@ -2728,7 +2732,7 @@ function TechnicianApp() {
     setDataLoading(true);
     try {
       const [jobRows, customerRows, equipmentRows, reminderRows] = await Promise.all([
-        restRequest(`service_requests?select=*,customers(id,first_name,last_name,user_id,users(phone,email)),properties(id,address_line1,address_line2,city,state,postal_code),service_lines(key,label)&assigned_technician_id=eq.${technicianId}&order=preferred_date.asc`, { token }),
+        restRequest(`service_requests?select=*,customers(id,first_name,last_name,user_id,users(phone,email)),properties(id,address_line1,address_line2,city,state,postal_code,property_profile_id),service_lines(key,label)&assigned_technician_id=eq.${technicianId}&order=preferred_date.asc`, { token }),
         restRequest(`customers?select=id,first_name,last_name,user_id,users(phone,email),properties(id,address_line1,address_line2,city,state,postal_code)&order=first_name.asc`, { token }),
         restRequest(`equipment?select=*&order=created_at.desc`, { token }),
         restRequest(`reminders?select=*&order=due_date.asc`, { token }),
@@ -2804,6 +2808,31 @@ function TechnicianApp() {
     }
   };
 
+  // Opens the job's Property Profile, auto-creating and linking one from the job's own address
+  // if it doesn't exist yet — the technician never has to re-type the address.
+  const openPropertyProfile = async (job) => {
+    if (job.properties.property_profile_id) { setPropertyProfileId(job.properties.property_profile_id); return; }
+    try {
+      const id = crypto.randomUUID();
+      await writeRow("property_profiles", {
+        id, address_line1: job.properties.address_line1, address_line2: job.properties.address_line2 || null,
+        city: job.properties.city, state: job.properties.state, postal_code: job.properties.postal_code,
+        customer_id: job.customer_id, created_by_user_id: session.user.id,
+      }, { token: session.access_token });
+      await patchRow("properties", `id=eq.${job.property_id}`, { property_profile_id: id }, { token: session.access_token });
+      try {
+        const result = await findProperty({ address_line1: job.properties.address_line1, city: job.properties.city, state: job.properties.state, postal_code: job.properties.postal_code }, session.access_token);
+        if (result?.fields?.length) for (const f of result.fields) await writeFieldSource(id, f.field_name, f.value, f.source, f.source_name, session.access_token);
+      } catch {
+        // Lookup failure shouldn't block opening the profile — fields just stay "Not available".
+      }
+      setJobs((js) => js.map((j) => (j.id === job.id ? { ...j, properties: { ...j.properties, property_profile_id: id } } : j)));
+      setPropertyProfileId(id);
+    } catch (e) {
+      alert(`Couldn't open the property profile: ${e.message}`);
+    }
+  };
+
   const call = (phone) => { if (phone) window.location.href = `tel:${phone}`; };
   const text = (phone) => { if (phone) window.location.href = `sms:${phone}`; };
   const directions = (property) => { window.open(directionsUrl(property), "_blank"); };
@@ -2823,7 +2852,9 @@ function TechnicianApp() {
   const currentCustomer = customers.find((c) => c.id === openCustomerId) || null;
 
   let body, modalsHost = null;
-  if (historyFor) {
+  if (propertyProfileId) {
+    body = <PropertyProfileDetail profileId={propertyProfileId} session={session} onBack={() => setPropertyProfileId(null)} />;
+  } else if (historyFor) {
     body = <CustomerHistoryScreen customerId={historyFor.customerId} customerName={historyFor.name} session={session} onBack={() => setHistoryFor(null)} />;
   } else if (openCustomerId && currentCustomer) {
     body = (
@@ -2842,6 +2873,7 @@ function TechnicianApp() {
         onBack={() => setOpenJobId(null)} onStart={startJob} onUndoStart={undoStart} onCall={call} onText={text} onDirections={directions}
         onOpenModal={(type, data) => setModal({ type, data })}
         onOpenHistory={(customerId, name) => setHistoryFor({ customerId, name })}
+        onOpenPropertyProfile={openPropertyProfile}
       />
     );
     modalsHost = (
@@ -2901,7 +2933,7 @@ function TechnicianApp() {
       {modalsHost}
       <div style={{ display: "flex", borderTop: `1px solid ${C.line}`, background: "#fff" }}>
         {TECH_TABS.map((t) => (
-          <div key={t.key} onClick={() => { setTab(t.key); setOpenJobId(null); setOpenCustomerId(null); setHistoryFor(null); }} style={{ flex: 1, textAlign: "center", padding: "10px 0 12px", cursor: "pointer" }}>
+          <div key={t.key} onClick={() => { setTab(t.key); setOpenJobId(null); setOpenCustomerId(null); setHistoryFor(null); setPropertyProfileId(null); }} style={{ flex: 1, textAlign: "center", padding: "10px 0 12px", cursor: "pointer" }}>
             <t.icon size={20} color={tab === t.key ? C.terracotta : C.ash} style={{ margin: "0 auto" }} />
             <div style={{ fontFamily: BODY, fontSize: 10.5, fontWeight: 600, color: tab === t.key ? C.terracotta : C.ash, marginTop: 3 }}>{t.label}</div>
           </div>
@@ -2909,6 +2941,783 @@ function TechnicianApp() {
       </div>
     </div>
   );
+}
+
+/* ============================= PROPERTY PROFILES ============================= */
+// Real Estate Property Profile & Automatic Home Lookup. One row per real-world address
+// (property_profiles), independent of any customer — an agent, inspector, or technician can look
+// up any address. Every automatically-populated field is tracked in
+// property_profile_field_sources so its origin, retrieval date, and any conflicting values stay
+// visible instead of silently overwritten (see writeFieldSource/resolveFieldConflict below).
+// This is an organizing/summarizing tool, not a substitute for a licensed inspection, appraisal,
+// or engineering evaluation — nothing here makes a safety or valuation determination.
+
+const PROPERTY_FIELDS = {
+  county: { label: "County", type: "text" },
+  parcel_number: { label: "Parcel / APN", type: "text" },
+  property_type: { label: "Property Type", type: "text" },
+  year_built: { label: "Year Built", type: "year" },
+  total_sqft: { label: "Total Square Footage", type: "sqft" },
+  finished_sqft: { label: "Finished / Living Sq. Ft.", type: "sqft" },
+  lot_size_acres: { label: "Lot Size", type: "acres" },
+  bedrooms: { label: "Bedrooms", type: "number" },
+  bathrooms: { label: "Bathrooms", type: "number" },
+  stories: { label: "Stories", type: "number" },
+  has_basement: { label: "Basement", type: "bool" },
+  has_garage: { label: "Garage", type: "bool" },
+  garage_size: { label: "Garage Size", type: "text" },
+  construction_type: { label: "Construction Type", type: "text" },
+  exterior_materials: { label: "Exterior Materials", type: "text" },
+  heating_type: { label: "Heating Type", type: "text" },
+  cooling_type: { label: "Cooling Type", type: "text" },
+  sewer_type: { label: "Sewer Type", type: "text" },
+  water_source: { label: "Water Source", type: "text" },
+  zoning: { label: "Zoning", type: "text" },
+  assessed_value: { label: "Tax-Assessed Value", type: "currency" },
+  annual_property_tax: { label: "Property Taxes (Annual)", type: "currency" },
+  last_sale_date: { label: "Last Sale Date", type: "date" },
+  last_sale_price: { label: "Last Sale Price", type: "currency" },
+  hoa_info: { label: "HOA", type: "text" },
+  flood_zone: { label: "Flood Zone", type: "text" },
+  school_district: { label: "School District", type: "text" },
+  latitude: { label: "Latitude", type: "coord" },
+  longitude: { label: "Longitude", type: "coord" },
+};
+const OVERVIEW_FIELD_KEYS = ["total_sqft", "finished_sqft", "lot_size_acres", "year_built", "bedrooms", "bathrooms", "stories", "has_basement", "has_garage", "garage_size", "property_type", "construction_type", "exterior_materials"];
+const RECORDS_FIELD_KEYS = ["parcel_number", "county", "assessed_value", "annual_property_tax", "last_sale_date", "last_sale_price", "hoa_info"];
+const LOCATION_FIELD_KEYS = ["heating_type", "cooling_type", "sewer_type", "water_source", "zoning", "flood_zone", "school_district", "latitude", "longitude"];
+const NUMERIC_FIELD_TYPES = ["number", "sqft", "acres", "currency", "year", "coord"];
+
+function formatFullDate(iso) {
+  if (!iso) return "";
+  return new Date(`${iso}T00:00:00`).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+function formatFieldValue(value, type) {
+  if (value === null || value === undefined || value === "") return null;
+  if (type === "sqft") return `${Number(value).toLocaleString()} sq. ft.`;
+  if (type === "acres") return `${Number(value).toLocaleString()} acres`;
+  if (type === "currency") return `$${Number(value).toLocaleString()}`;
+  if (type === "date") return formatFullDate(value);
+  if (type === "bool") return value === true || value === "true" || value === "t" ? "Yes" : "No";
+  if (type === "coord") return Number(value).toFixed(5);
+  return String(value);
+}
+
+// 🟢 official/public record · 🔵 property-data provider · 🟡 user entered · ⚠️ conflicting · ⚪ not available.
+// Census/FEMA lookups are genuine federal government records, so they carry the "official record"
+// badge, not the commercial "property-data provider" one (reserved for a configured paid API).
+const SOURCE_BADGE = {
+  public_record: { icon: "🟢", label: "Official / public record" },
+  free_data: { icon: "🟢", label: "Official / public record" },
+  paid_api: { icon: "🔵", label: "Property-data provider" },
+  user_entered: { icon: "🟡", label: "User entered" },
+};
+const UNAVAILABLE_BADGE = { icon: "⚪", label: "Not available" };
+const CONFLICT_BADGE = { icon: "⚠️", label: "Conflicting information" };
+
+const HOME_SYSTEM_DEFS = {
+  hvac: {
+    label: "HVAC",
+    fields: [
+      { key: "heating_system", label: "Heating System", type: "text" },
+      { key: "cooling_system", label: "Cooling System", type: "text" },
+      { key: "equipment_age", label: "Equipment Age (years)", type: "number" },
+      { key: "manufacturer", label: "Manufacturer", type: "text" },
+      { key: "model", label: "Model", type: "text" },
+      { key: "serial_number", label: "Serial Number", type: "text" },
+      { key: "tonnage", label: "Tonnage", type: "text" },
+      { key: "furnace_btu", label: "Furnace BTU", type: "text" },
+      { key: "refrigerant", label: "Refrigerant", type: "text" },
+      { key: "efficiency", label: "Efficiency", type: "text" },
+      { key: "condition", label: "Condition", type: "select", options: ["Good", "Fair", "Aging", "Needs Attention"] },
+      { key: "last_service", label: "Last Service", type: "date" },
+    ],
+  },
+  plumbing: {
+    label: "Plumbing",
+    fields: [
+      { key: "water_heater", label: "Water Heater", type: "text" },
+      { key: "water_heater_age", label: "Water Heater Age (years)", type: "number" },
+      { key: "water_supply", label: "Water Supply", type: "text" },
+      { key: "sewer", label: "Sewer", type: "text" },
+      { key: "sump_pump", label: "Sump Pump", type: "select", options: ["Yes", "No", "Unknown"] },
+      { key: "water_softener", label: "Water Softener", type: "select", options: ["Yes", "No", "Unknown"] },
+      { key: "condition", label: "Condition", type: "select", options: ["Good", "Fair", "Aging", "Needs Attention"] },
+    ],
+  },
+  electrical: {
+    label: "Electrical",
+    fields: [
+      { key: "panel", label: "Electrical Panel", type: "text" },
+      { key: "panel_amperage", label: "Panel Amperage", type: "text" },
+      { key: "panel_manufacturer", label: "Panel Manufacturer", type: "text" },
+      { key: "generator", label: "Generator", type: "select", options: ["Yes", "No", "Unknown"] },
+      { key: "ev_charger", label: "EV Charger", type: "select", options: ["Yes", "No", "Unknown"] },
+      { key: "other_equipment", label: "Other Electrical Equipment", type: "text" },
+      { key: "condition", label: "Condition", type: "select", options: ["Good", "Fair", "Aging", "Needs Attention"] },
+    ],
+  },
+  radon: {
+    label: "Radon",
+    fields: [
+      { key: "previous_test", label: "Previous Radon Test", type: "select", options: ["Yes", "No", "Unknown"] },
+      { key: "radon_level", label: "Radon Level (pCi/L)", type: "text" },
+      { key: "test_date", label: "Test Date", type: "date" },
+      { key: "mitigation_system", label: "Mitigation System", type: "select", options: ["Yes", "No", "Unknown"] },
+      { key: "fan", label: "Fan", type: "text" },
+      { key: "installation_date", label: "Installation Date", type: "date" },
+    ],
+  },
+};
+const INSPECTION_AREAS = ["Attic", "Basement", "Crawlspace", "Roof", "Windows", "Exterior", "Garage", "Other"];
+const HISTORY_EVENT_TYPES = ["built", "sale", "listing", "service", "inspection", "estimate", "repair", "replacement", "hvac_evaluation", "other"];
+
+function homeSystemStatusDot(system) {
+  if (!system || system.status !== "documented") return "🔵";
+  const condition = system.details?.condition;
+  if (condition === "Needs Attention") return "🔴";
+  if (condition === "Aging" || condition === "Fair") return "🟡";
+  return "🟢";
+}
+function homeSystemSummary(systemType, system) {
+  if (!system || system.status !== "documented") return systemType === "radon" ? "Testing not documented" : "Not inspected";
+  const d = system.details || {};
+  if (systemType === "hvac") return d.condition ? `Equipment ${d.condition.toLowerCase()}` : d.equipment_age ? `${d.equipment_age} years old` : "Documented";
+  if (systemType === "plumbing") return d.condition ? `Condition: ${d.condition}` : "Documented";
+  if (systemType === "electrical") return d.condition ? `Condition: ${d.condition}` : "No major issues documented";
+  if (systemType === "radon") return d.previous_test === "Yes" ? `Last tested ${d.test_date || "date unknown"}` : "Testing not documented";
+  return "Documented";
+}
+// Matches the spec's snapshot example, which calls out Water Heater separately even though it's
+// structurally part of the Plumbing system.
+function buildSnapshot(systems) {
+  const elec = systems.electrical, hvac = systems.hvac, plumb = systems.plumbing, radon = systems.radon;
+  const whAge = plumb?.details?.water_heater_age;
+  return [
+    { icon: homeSystemStatusDot(elec), label: "Electrical", detail: homeSystemSummary("electrical", elec) },
+    { icon: homeSystemStatusDot(hvac), label: "HVAC", detail: homeSystemSummary("hvac", hvac) },
+    { icon: whAge ? (Number(whAge) >= 8 ? "🟡" : "🟢") : "🔵", label: "Water Heater", detail: whAge ? `${whAge} years old` : "Not inspected" },
+    { icon: homeSystemStatusDot(plumb), label: "Plumbing", detail: homeSystemSummary("plumbing", plumb) },
+    { icon: homeSystemStatusDot(radon), label: "Radon", detail: homeSystemSummary("radon", radon) },
+  ];
+}
+
+async function findProperty(address, token) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/lookup-property`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(address),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || "Property lookup failed");
+  return json; // { fields: [{field_name,value,source,source_name}], geocoded }
+}
+
+// Applies one field's value with provenance tracking. `authoritative` (a direct user edit)
+// always wins and supersedes prior sources; an automatic fetch that disagrees with an existing
+// value is instead recorded as a second "current" row — a conflict to be shown and resolved, per
+// "If multiple sources provide conflicting information, display the conflict and allow the user
+// to select the preferred value."
+async function writeFieldSource(profileId, fieldName, value, source, sourceName, token, { authoritative = false } = {}) {
+  const existing = await restRequest(`property_profile_field_sources?property_profile_id=eq.${profileId}&field_name=eq.${fieldName}&is_current=eq.true`, { token }).catch(() => []);
+  const stringValue = value === null || value === undefined ? null : String(value);
+  const conflict = !authoritative && existing.length > 0 && existing.some((e) => String(e.value) !== stringValue);
+  if (!conflict) {
+    for (const row of existing) {
+      if (String(row.value) !== stringValue) await patchRow("property_profile_field_sources", `id=eq.${row.id}`, { is_current: false }, { token });
+    }
+    if (existing.length === 0 || !existing.some((e) => String(e.value) === stringValue)) {
+      await writeRow("property_profile_field_sources", { id: crypto.randomUUID(), property_profile_id: profileId, field_name: fieldName, value: stringValue, source, source_name: sourceName }, { token });
+    }
+    await patchRow("property_profiles", `id=eq.${profileId}`, { [fieldName]: value }, { token });
+    return { conflict: false };
+  }
+  await writeRow("property_profile_field_sources", { id: crypto.randomUUID(), property_profile_id: profileId, field_name: fieldName, value: stringValue, source, source_name: sourceName }, { token });
+  return { conflict: true };
+}
+
+async function resolveFieldConflict(profileId, fieldName, chosenRow, allCurrentRows, token) {
+  for (const row of allCurrentRows) {
+    if (row.id !== chosenRow.id) await patchRow("property_profile_field_sources", `id=eq.${row.id}`, { is_current: false }, { token });
+  }
+  await patchRow("property_profiles", `id=eq.${profileId}`, { [fieldName]: chosenRow.value }, { token });
+}
+
+function FieldEditModal({ label, type, initial, onSave, onClose, saving, error }) {
+  const [value, setValue] = useState(type === "bool" ? (initial === true) : (initial ?? ""));
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 15 };
+  const inputType = NUMERIC_FIELD_TYPES.includes(type) ? "number" : type === "date" ? "date" : "text";
+  return (
+    <Modal onClose={onClose} maxWidth={380}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Edit {label}</div>
+      {type === "bool" ? (
+        <select value={String(value)} onChange={(e) => setValue(e.target.value === "true")} style={inputStyle}>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      ) : (
+        <input style={inputStyle} type={inputType} value={value} onChange={(e) => setValue(e.target.value)} />
+      )}
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={() => onSave(value)}>{saving ? "Saving…" : "Save"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function ConflictModal({ fieldLabel, rows, onResolve, onClose }) {
+  return (
+    <Modal onClose={onClose} maxWidth={420}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 6 }}>⚠️ {fieldLabel} — Conflicting Information</div>
+      <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginBottom: 14 }}>Choose which value should be current.</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {rows.map((r) => (
+          <div key={r.id} onClick={() => onResolve(r)} style={{ cursor: "pointer", padding: "12px 14px", borderRadius: 12, border: `1.5px solid ${C.line}`, background: "#F8F5EF" }}>
+            <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14.5 }}>{r.value}</div>
+            <div style={{ fontFamily: BODY, fontSize: 11.5, color: C.ash, marginTop: 2 }}>{SOURCE_BADGE[r.source]?.icon} {r.source_name || SOURCE_BADGE[r.source]?.label} · {formatFullDate((r.retrieved_at || "").slice(0, 10))}</div>
+          </div>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+function FieldRow({ fieldKey, def, value, sourceInfo, conflictRows, onEdit, onResolveConflict }) {
+  const display = formatFieldValue(value, def.type);
+  const isConflict = (conflictRows?.length || 0) > 1;
+  const badge = isConflict ? CONFLICT_BADGE : sourceInfo ? SOURCE_BADGE[sourceInfo.source] || UNAVAILABLE_BADGE : UNAVAILABLE_BADGE;
+  return (
+    <div onClick={() => (isConflict ? onResolveConflict(fieldKey, def.label, conflictRows) : onEdit(fieldKey, def.label, def.type, value))}
+      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: `1px solid ${C.line}`, cursor: "pointer" }}>
+      <div>
+        <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{def.label}</div>
+        <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14.5, color: C.ink }}>{display || "Not available"}</div>
+      </div>
+      <div style={{ fontFamily: BODY, fontSize: 15 }} title={badge.label}>{badge.icon}</div>
+    </div>
+  );
+}
+
+function DiscrepancyBanner({ discrepancy, fieldLabel, fieldType, session, onResolved }) {
+  const resolve = async (value) => {
+    await patchRow("property_profile_discrepancies", `id=eq.${discrepancy.id}`, { resolved_value: String(value), resolved_at: new Date().toISOString(), resolved_by_user_id: session.user.id }, { token: session.access_token });
+    if (String(value) === String(discrepancy.inspection_value)) {
+      await patchRow("property_profiles", `id=eq.${discrepancy.property_profile_id}`, { [discrepancy.field_name]: value }, { token: session.access_token });
+    }
+    onResolved();
+  };
+  return (
+    <Card style={{ marginBottom: 14, background: "#FFF7E8", border: "1.5px solid #E8C97A" }}>
+      <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14, color: "#8A5A15" }}>⚠️ {fieldLabel} discrepancy</div>
+      <div style={{ fontFamily: BODY, fontSize: 13, marginTop: 6 }}>Public record: {formatFieldValue(discrepancy.record_value, fieldType)}</div>
+      <div style={{ fontFamily: BODY, fontSize: 13 }}>Inspection measurement: {formatFieldValue(discrepancy.inspection_value, fieldType)}</div>
+      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <div style={{ flex: 1 }}><GhostButton full onClick={() => resolve(discrepancy.record_value)}>Keep Record</GhostButton></div>
+        <div style={{ flex: 1 }}><PrimaryButton full onClick={() => resolve(discrepancy.inspection_value)}>Use Inspection</PrimaryButton></div>
+      </div>
+    </Card>
+  );
+}
+
+function HomeSystemFormModal({ profileId, systemType, existing, session, onClose, onSaved }) {
+  const def = HOME_SYSTEM_DEFS[systemType];
+  const [details, setDetails] = useState(existing?.details || {});
+  const [notes, setNotes] = useState(existing?.notes || "");
+  const [tier, setTier] = useState(existing?.verification_tier && existing.verification_tier !== "unknown" ? existing.verification_tier : "user_entered");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const set = (k, v) => setDetails((d) => ({ ...d, [k]: v }));
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 10, borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14 };
+  const save = async () => {
+    setSaving(true); setError(null);
+    try {
+      const hasAnyValue = Object.values(details).some((v) => v !== "" && v != null);
+      const row = { details, notes: notes.trim() || null, status: hasAnyValue || notes.trim() ? "documented" : "not_inspected", verification_tier: tier, updated_by_user_id: session.user.id };
+      if (existing) await patchRow("property_profile_home_systems", `id=eq.${existing.id}`, row, { token: session.access_token });
+      else await writeRow("property_profile_home_systems", { id: crypto.randomUUID(), property_profile_id: profileId, system_type: systemType, ...row }, { token: session.access_token });
+      onSaved(); onClose();
+    } catch (e) { setError(e.message); } finally { setSaving(false); }
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={440}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>{def.label}</div>
+      <SectionLabel>Verified By</SectionLabel>
+      <select style={{ ...inputStyle, marginBottom: 14 }} value={tier} onChange={(e) => setTier(e.target.value)}>
+        <option value="user_entered">User Entered</option>
+        <option value="inspection">Inspection</option>
+        <option value="technician_verified">Technician-Verified</option>
+      </select>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {def.fields.map((f) => (
+          <div key={f.key}>
+            <SectionLabel>{f.label}</SectionLabel>
+            {f.type === "select" ? (
+              <select style={inputStyle} value={details[f.key] || ""} onChange={(e) => set(f.key, e.target.value)}>
+                <option value="">Select…</option>
+                {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
+              </select>
+            ) : (
+              <input style={inputStyle} type={f.type === "number" ? "number" : f.type === "date" ? "date" : "text"} value={details[f.key] || ""} onChange={(e) => set(f.key, e.target.value)} />
+            )}
+          </div>
+        ))}
+        <div>
+          <SectionLabel>Notes</SectionLabel>
+          <textarea rows={2} style={{ ...inputStyle, resize: "none" }} value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </div>
+      </div>
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function AddHistoryEventModal({ profileId, session, onClose, onSaved }) {
+  const [eventType, setEventType] = useState("service");
+  const [eventDate, setEventDate] = useState(toISODate(new Date()));
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 10, borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14 };
+  const save = async () => {
+    if (!title.trim()) { setError("Enter a short title for this event."); return; }
+    setSaving(true); setError(null);
+    try {
+      await writeRow("property_profile_history_events", {
+        id: crypto.randomUUID(), property_profile_id: profileId, event_date: eventDate, event_type: eventType,
+        title: title.trim(), description: description.trim() || null, created_by_user_id: session.user.id,
+      }, { token: session.access_token });
+      onSaved(); onClose();
+    } catch (e) { setError(e.message); } finally { setSaving(false); }
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={420}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Add History Event</div>
+      <SectionLabel>Type</SectionLabel>
+      <select style={inputStyle} value={eventType} onChange={(e) => setEventType(e.target.value)}>
+        {HISTORY_EVENT_TYPES.map((t) => <option key={t} value={t}>{humanize(t)}</option>)}
+      </select>
+      <div style={{ height: 10 }} />
+      <SectionLabel>Date</SectionLabel>
+      <input style={inputStyle} type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
+      <div style={{ height: 10 }} />
+      <SectionLabel>Title</SectionLabel>
+      <input style={inputStyle} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Water heater replaced" />
+      <div style={{ height: 10 }} />
+      <SectionLabel>Details (optional)</SectionLabel>
+      <textarea rows={2} style={{ ...inputStyle, resize: "none" }} value={description} onChange={(e) => setDescription(e.target.value)} />
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Add Event"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function InspectionModeModal({ profile, session, onClose, onSaved, onOpenSystem }) {
+  const [inspectedSqft, setInspectedSqft] = useState("");
+  const [areaNotes, setAreaNotes] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 10, borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14 };
+
+  const finish = async () => {
+    setSaving(true); setError(null);
+    try {
+      const token = session.access_token;
+      // Compare the inspection measurement against the record baseline instead of silently
+      // replacing it — flag a discrepancy for the user to resolve.
+      if (inspectedSqft && profile.total_sqft && Number(inspectedSqft) !== Number(profile.total_sqft)) {
+        await writeRow("property_profile_discrepancies", {
+          id: crypto.randomUUID(), property_profile_id: profile.id, field_name: "total_sqft",
+          record_value: String(profile.total_sqft), inspection_value: String(inspectedSqft),
+        }, { token });
+      }
+      const areaText = Object.entries(areaNotes).filter(([, v]) => v.trim()).map(([area, v]) => `${area}: ${v.trim()}`).join("\n");
+      await writeRow("property_profile_history_events", {
+        id: crypto.randomUUID(), property_profile_id: profile.id, event_date: toISODate(new Date()), event_type: "inspection",
+        title: "Property inspection", description: areaText || null, created_by_user_id: session.user.id,
+      }, { token });
+      onSaved(); onClose();
+    } catch (e) { setError(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal onClose={onClose} maxWidth={460}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 4 }}>🔎 Home Inspection</div>
+      <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash, marginBottom: 14 }}>This organizes and summarizes findings — it does not replace a licensed inspection, appraisal, or engineering evaluation.</div>
+
+      <SectionLabel>HVAC, Plumbing, Electrical & Radon</SectionLabel>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+        {Object.keys(HOME_SYSTEM_DEFS).map((key) => <GhostButton key={key} onClick={() => onOpenSystem(key)}>{HOME_SYSTEM_DEFS[key].label}</GhostButton>)}
+      </div>
+
+      <SectionLabel>Measured Square Footage (optional)</SectionLabel>
+      <input style={inputStyle} type="number" placeholder={profile.total_sqft ? `Record: ${profile.total_sqft}` : "e.g. 2790"} value={inspectedSqft} onChange={(e) => setInspectedSqft(e.target.value)} />
+      <div style={{ height: 14 }} />
+
+      <SectionLabel>Other Areas</SectionLabel>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {INSPECTION_AREAS.map((area) => (
+          <input key={area} style={inputStyle} placeholder={`${area} — findings (optional)`} value={areaNotes[area] || ""} onChange={(e) => setAreaNotes((a) => ({ ...a, [area]: e.target.value }))} />
+        ))}
+      </div>
+
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={finish}>{saving ? "Saving…" : "Finish Inspection"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
+function PropertyAgentSection({ profile, session, documents, uploading, fileRef, onUpload, onSaved }) {
+  const [buyer, setBuyer] = useState(profile.buyer_name || "");
+  const [seller, setSeller] = useState(profile.seller_name || "");
+  const [agentName, setAgentName] = useState(profile.agent_name || "");
+  const [status, setStatus] = useState(profile.transaction_status || "none");
+  const [notes, setNotes] = useState(profile.agent_notes || "");
+  const [saving, setSaving] = useState(false);
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 10, borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14 };
+  const save = async () => {
+    setSaving(true);
+    try {
+      await patchRow("property_profiles", `id=eq.${profile.id}`, {
+        buyer_name: buyer.trim() || null, seller_name: seller.trim() || null, agent_name: agentName.trim() || null,
+        transaction_status: status, agent_notes: notes.trim() || null,
+      }, { token: session.access_token });
+      onSaved();
+    } finally { setSaving(false); }
+  };
+  const copySummary = () => {
+    const lines = [
+      `${profile.address_line1}, ${profile.city}, ${profile.state} ${profile.postal_code}`,
+      profile.total_sqft ? `${Number(profile.total_sqft).toLocaleString()} sq. ft. | Built ${profile.year_built || "—"} | ${profile.bedrooms || "—"} Bed | ${profile.bathrooms || "—"} Bath` : "",
+      "", "Generated by Luxury Comfort Solutions Property Profile",
+    ].filter(Boolean).join("\n");
+    navigator.clipboard?.writeText(lines).catch(() => {});
+  };
+  return (
+    <div>
+      <Card style={{ marginBottom: 14 }}>
+        <SectionLabel>Transaction</SectionLabel>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <input style={inputStyle} placeholder="Buyer name" value={buyer} onChange={(e) => setBuyer(e.target.value)} />
+          <input style={inputStyle} placeholder="Seller name" value={seller} onChange={(e) => setSeller(e.target.value)} />
+          <input style={inputStyle} placeholder="Agent name" value={agentName} onChange={(e) => setAgentName(e.target.value)} />
+          <select style={inputStyle} value={status} onChange={(e) => setStatus(e.target.value)}>
+            {["none", "listed", "under_contract", "pending_inspection", "closed"].map((s) => <option key={s} value={s}>{humanize(s)}</option>)}
+          </select>
+          <textarea rows={3} style={{ ...inputStyle, resize: "none" }} placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </div>
+        <div style={{ marginTop: 12 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</PrimaryButton></div>
+      </Card>
+      <Card style={{ marginBottom: 14 }}>
+        <SectionLabel>Documents</SectionLabel>
+        <input ref={fileRef} type="file" accept="application/pdf,image/*" multiple onChange={onUpload} style={{ display: "none" }} />
+        <GhostButton full onClick={() => fileRef.current?.click()}>{uploading ? "Uploading…" : "📎 Upload Inspection Report / Disclosure"}</GhostButton>
+        {documents.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginTop: 10 }}>No documents uploaded yet.</div>}
+        {documents.map((d) => <div key={d.id} style={{ fontFamily: BODY, fontSize: 13, padding: "6px 0", borderTop: `1px solid ${C.line}` }}>{d.file_url.split("/").pop()}</div>)}
+      </Card>
+      <GhostButton full onClick={copySummary}>📋 Copy Shareable Summary</GhostButton>
+      <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, marginTop: 8, lineHeight: 1.5 }}>
+        This profile organizes and summarizes property information — it is not a licensed inspection, appraisal, engineering evaluation, or valuation.
+      </div>
+    </div>
+  );
+}
+
+function PropertyProfileDetail({ profileId, session, onBack }) {
+  const [profile, setProfile] = useState(null);
+  const [sources, setSources] = useState([]);
+  const [systems, setSystems] = useState({});
+  const [history, setHistory] = useState([]);
+  const [discrepancies, setDiscrepancies] = useState([]);
+  const [documents, setDocuments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [subtab, setSubtab] = useState("overview");
+  const [editField, setEditField] = useState(null);
+  const [fieldSaveBusy, setFieldSaveBusy] = useState(false);
+  const [fieldSaveError, setFieldSaveError] = useState(null);
+  const [conflictField, setConflictField] = useState(null);
+  const [systemModal, setSystemModal] = useState(null);
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [inspectionOpen, setInspectionOpen] = useState(false);
+  const fileRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [profileRows, sourceRows, systemRows, historyRows, discrepancyRows, docRows] = await Promise.all([
+        restRequest(`property_profiles?id=eq.${profileId}`, { token: session.access_token }),
+        restRequest(`property_profile_field_sources?property_profile_id=eq.${profileId}&is_current=eq.true`, { token: session.access_token }),
+        restRequest(`property_profile_home_systems?property_profile_id=eq.${profileId}`, { token: session.access_token }),
+        restRequest(`property_profile_history_events?property_profile_id=eq.${profileId}&order=event_date.desc`, { token: session.access_token }),
+        restRequest(`property_profile_discrepancies?property_profile_id=eq.${profileId}&resolved_at=is.null`, { token: session.access_token }),
+        restRequest(`attachments?related_entity_type=eq.property_profile&related_entity_id=eq.${profileId}&order=created_at.desc`, { token: session.access_token }),
+      ]);
+      setProfile(profileRows[0]);
+      setSources(sourceRows || []);
+      const sysByType = {};
+      (systemRows || []).forEach((s) => { sysByType[s.system_type] = s; });
+      setSystems(sysByType);
+      setHistory(historyRows || []);
+      setDiscrepancies(discrepancyRows || []);
+      setDocuments(docRows || []);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { load(); }, [profileId]);
+
+  if (loading || !profile) return <div style={{ padding: 30, fontFamily: BODY, color: C.ash }}>Loading property profile…</div>;
+
+  const sourcesByField = {};
+  sources.forEach((s) => { (sourcesByField[s.field_name] ||= []).push(s); });
+
+  const saveFieldEdit = async (value) => {
+    setFieldSaveBusy(true); setFieldSaveError(null);
+    try {
+      const def = PROPERTY_FIELDS[editField.key];
+      const coerced = NUMERIC_FIELD_TYPES.includes(def.type) ? (value === "" ? null : Number(value)) : value;
+      await writeFieldSource(profileId, editField.key, coerced, "user_entered", "User entered", session.access_token, { authoritative: true });
+      setEditField(null);
+      load();
+    } catch (e) {
+      setFieldSaveError(e.message);
+    } finally {
+      setFieldSaveBusy(false);
+    }
+  };
+
+  const uploadDoc = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setUploading(true);
+    for (const file of files) {
+      const row = { id: crypto.randomUUID(), uploaded_by_user_id: session.user.id, related_entity_type: "property_profile", related_entity_id: profileId, file_type: file.type || "application/octet-stream" };
+      await uploadJobPhoto(profileId, file, row, session.access_token, "property-documents");
+    }
+    setUploading(false);
+    if (fileRef.current) fileRef.current.value = "";
+    load();
+  };
+
+  const snapshot = buildSnapshot(systems);
+  const subtabs = [
+    { key: "overview", label: "Overview" },
+    { key: "records", label: "Records" },
+    { key: "systems", label: "Home Systems" },
+    { key: "history", label: "History" },
+    { key: "agent", label: "Documents & Agent" },
+  ];
+  const rowProps = (k) => ({
+    fieldKey: k, def: PROPERTY_FIELDS[k], value: profile[k], sourceInfo: sourcesByField[k]?.[0], conflictRows: sourcesByField[k],
+    onEdit: (key, label, type, value) => setEditField({ key, label, type, value }),
+    onResolveConflict: (key, label, rows) => setConflictField({ key, label, rows }),
+  });
+
+  return (
+    <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
+      <AppBar title={profile.address_line1} onBack={onBack} />
+      <div style={{ padding: "0 18px 30px" }}>
+        <div style={{ fontFamily: BODY, fontSize: 13.5, color: C.ash, marginBottom: 4 }}>{profile.city}, {profile.state} {profile.postal_code}</div>
+        <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14, color: C.ink, marginBottom: 14 }}>
+          {[
+            profile.total_sqft ? `${Number(profile.total_sqft).toLocaleString()} sq. ft.` : null,
+            profile.year_built ? `Built ${profile.year_built}` : null,
+            profile.stories ? `${profile.stories} Stories` : null,
+            profile.bedrooms ? `${profile.bedrooms} Bed` : null,
+            profile.bathrooms ? `${profile.bathrooms} Bath` : null,
+          ].filter(Boolean).join(" | ") || "Details not yet available"}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <div style={{ flex: 1 }}><PrimaryButton full onClick={() => setInspectionOpen(true)}>🔎 Start Home Inspection</PrimaryButton></div>
+          <div style={{ flex: 1 }}><GhostButton full onClick={() => window.print()}>🖨️ Print / PDF Report</GhostButton></div>
+        </div>
+
+        <Card style={{ marginBottom: 16 }}>
+          <SectionLabel>Home Systems Snapshot</SectionLabel>
+          {snapshot.map((row) => (
+            <div key={row.label} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontFamily: BODY, fontSize: 13.5 }}>
+              <span>{row.icon}</span><b>{row.label}</b> — <span style={{ color: C.ash }}>{row.detail}</span>
+            </div>
+          ))}
+        </Card>
+
+        <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+          {subtabs.map((t) => (
+            <div key={t.key} onClick={() => setSubtab(t.key)} style={{ padding: "8px 14px", borderRadius: 999, cursor: "pointer", fontFamily: BODY, fontWeight: 700, fontSize: 12.5, background: subtab === t.key ? C.terracotta : "#F1EBE0", color: subtab === t.key ? "#fff" : C.ink }}>{t.label}</div>
+          ))}
+        </div>
+
+        {(subtab === "overview" || subtab === "records") && discrepancies.map((d) => (
+          <DiscrepancyBanner key={d.id} discrepancy={d} fieldLabel={PROPERTY_FIELDS[d.field_name]?.label || d.field_name} fieldType={PROPERTY_FIELDS[d.field_name]?.type || "text"} session={session} onResolved={load} />
+        ))}
+
+        {subtab === "overview" && (
+          <Card>
+            <SectionLabel>Property Overview</SectionLabel>
+            {OVERVIEW_FIELD_KEYS.map((k) => <FieldRow key={k} {...rowProps(k)} />)}
+          </Card>
+        )}
+
+        {subtab === "records" && (
+          <>
+            <Card>
+              <SectionLabel>Property Records</SectionLabel>
+              {RECORDS_FIELD_KEYS.map((k) => <FieldRow key={k} {...rowProps(k)} />)}
+            </Card>
+            <div style={{ height: 14 }} />
+            <Card>
+              <SectionLabel>Location & Utilities</SectionLabel>
+              {LOCATION_FIELD_KEYS.map((k) => <FieldRow key={k} {...rowProps(k)} />)}
+            </Card>
+          </>
+        )}
+
+        {subtab === "systems" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {Object.keys(HOME_SYSTEM_DEFS).map((key) => {
+              const sys = systems[key];
+              const tierLabel = sys && sys.verification_tier !== "unknown"
+                ? (sys.verification_tier === "technician_verified" ? "🟢 Technician-verified" : sys.verification_tier === "inspection" ? "🔵 Inspection" : "🟡 User entered")
+                : "⚪ Not inspected";
+              return (
+                <Card key={key} onClick={() => setSystemModal(key)} style={{ cursor: "pointer" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 15 }}>{HOME_SYSTEM_DEFS[key].label}</div>
+                    <div style={{ fontFamily: BODY, fontSize: 11.5, color: C.ash }}>{tierLabel}</div>
+                  </div>
+                  <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 4 }}>{homeSystemSummary(key, sys)}</div>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+
+        {subtab === "history" && (
+          <>
+            <div style={{ marginBottom: 12 }}><PrimaryButton full onClick={() => setHistoryModalOpen(true)}>+ Add History Event</PrimaryButton></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {history.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No history recorded yet.</div>}
+              {history.map((h) => (
+                <Card key={h.id}>
+                  <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14 }}>{new Date(`${h.event_date}T00:00:00`).getFullYear()} — {h.title}</div>
+                  <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash, marginTop: 2 }}>{humanize(h.event_type)} · {formatFullDate(h.event_date)}</div>
+                  {h.description && <div style={{ fontFamily: BODY, fontSize: 13, marginTop: 6, whiteSpace: "pre-wrap" }}>{h.description}</div>}
+                </Card>
+              ))}
+            </div>
+          </>
+        )}
+
+        {subtab === "agent" && (
+          <PropertyAgentSection profile={profile} session={session} documents={documents} uploading={uploading} fileRef={fileRef} onUpload={uploadDoc} onSaved={load} />
+        )}
+      </div>
+
+      {editField && (
+        <FieldEditModal label={editField.label} type={editField.type} initial={editField.value} onClose={() => { setEditField(null); setFieldSaveError(null); }}
+          onSave={saveFieldEdit} saving={fieldSaveBusy} error={fieldSaveError} />
+      )}
+      {conflictField && (
+        <ConflictModal fieldLabel={conflictField.label} rows={conflictField.rows} onClose={() => setConflictField(null)}
+          onResolve={async (row) => { await resolveFieldConflict(profileId, conflictField.key, row, conflictField.rows, session.access_token); setConflictField(null); load(); }} />
+      )}
+      {systemModal && (
+        <HomeSystemFormModal profileId={profileId} systemType={systemModal} existing={systems[systemModal] || null} session={session}
+          onClose={() => setSystemModal(null)} onSaved={load} />
+      )}
+      {historyModalOpen && <AddHistoryEventModal profileId={profileId} session={session} onClose={() => setHistoryModalOpen(false)} onSaved={load} />}
+      {inspectionOpen && (
+        <InspectionModeModal profile={profile} session={session} onClose={() => setInspectionOpen(false)} onSaved={load}
+          onOpenSystem={(key) => { setInspectionOpen(false); setSystemModal(key); }} />
+      )}
+    </div>
+  );
+}
+
+function PropertyProfilesListScreen({ session, onOpen }) {
+  const [profiles, setProfiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
+  const [form, setForm] = useState({ address_line1: "", city: "", state: "", postal_code: "" });
+  const [looking, setLooking] = useState(false);
+  const [error, setError] = useState(null);
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 10, borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14 };
+
+  const load = () => {
+    setLoading(true);
+    restRequest(`property_profiles?select=*&order=updated_at.desc`, { token: session.access_token }).then((rows) => setProfiles(rows || [])).finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, []);
+
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const findAndCreate = async () => {
+    if (!form.address_line1.trim() || !form.city.trim() || !form.state.trim() || !form.postal_code.trim()) {
+      setError("Enter the full address — street, city, state, and ZIP."); return;
+    }
+    setLooking(true); setError(null);
+    try {
+      const id = crypto.randomUUID();
+      await writeRow("property_profiles", {
+        id, address_line1: form.address_line1.trim(), city: form.city.trim(), state: form.state.trim().toUpperCase(), postal_code: form.postal_code.trim(),
+        created_by_user_id: session.user.id,
+      }, { token: session.access_token });
+      try {
+        const result = await findProperty({ address_line1: form.address_line1.trim(), city: form.city.trim(), state: form.state.trim(), postal_code: form.postal_code.trim() }, session.access_token);
+        if (result?.fields?.length) for (const f of result.fields) await writeFieldSource(id, f.field_name, f.value, f.source, f.source_name, session.access_token);
+      } catch {
+        // Lookup failure shouldn't block creating the profile — fields just stay "Not available".
+      }
+      setForm({ address_line1: "", city: "", state: "", postal_code: "" });
+      load();
+      onOpen(id);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLooking(false);
+    }
+  };
+
+  const filtered = profiles.filter((p) => `${p.address_line1} ${p.city} ${p.state} ${p.postal_code}`.toLowerCase().includes(q.toLowerCase()));
+
+  return (
+    <div>
+      <Card style={{ marginBottom: 16 }}>
+        <SectionLabel>Find Property</SectionLabel>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <input style={inputStyle} placeholder="Street address" value={form.address_line1} onChange={(e) => set("address_line1", e.target.value)} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <input style={{ ...inputStyle, flex: 2 }} placeholder="City" value={form.city} onChange={(e) => set("city", e.target.value)} />
+            <input style={{ ...inputStyle, flex: 1 }} placeholder="State" value={form.state} onChange={(e) => set("state", e.target.value)} />
+            <input style={{ ...inputStyle, flex: 1 }} placeholder="ZIP" value={form.postal_code} onChange={(e) => set("postal_code", e.target.value)} />
+          </div>
+        </div>
+        {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+        <div style={{ marginTop: 12 }}><PrimaryButton full disabled={looking} onClick={findAndCreate}>{looking ? "Searching…" : "🔎 Find Property"}</PrimaryButton></div>
+      </Card>
+
+      <input style={{ ...inputStyle, marginBottom: 12 }} placeholder="Search saved properties…" value={q} onChange={(e) => setQ(e.target.value)} />
+      {loading ? <div style={{ fontFamily: BODY, color: C.ash }}>Loading…</div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {filtered.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No saved property profiles yet.</div>}
+          {filtered.map((p) => (
+            <Card key={p.id} onClick={() => onOpen(p.id)} style={{ cursor: "pointer" }}>
+              <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14 }}>{p.address_line1}</div>
+              <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>{p.city}, {p.state} {p.postal_code}</div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PropertyProfilesPanel({ session }) {
+  const [openId, setOpenId] = useState(null);
+  if (openId) return <PropertyProfileDetail profileId={openId} session={session} onBack={() => setOpenId(null)} />;
+  return <PropertyProfilesListScreen session={session} onOpen={setOpenId} />;
 }
 
 /* ============================= ADMIN PORTAL ============================= */
@@ -3420,6 +4229,7 @@ function AdminPortal() {
     { key: "reminders", label: "Reminders", icon: Bell },
     { key: "plans", label: "Plans & Promotions", icon: Tag },
     { key: "technicians", label: "Technicians", icon: Truck },
+    { key: "properties", label: "Property Profiles", icon: Home },
     { key: "settings", label: "Settings", icon: Settings },
   ];
 
@@ -3690,6 +4500,8 @@ function AdminPortal() {
             </Card>
           </>
         )}
+
+        {tab === "properties" && <PropertyProfilesPanel session={session} />}
 
         {tab === "settings" && (
           <>
