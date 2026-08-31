@@ -2856,7 +2856,7 @@ function TechnicianApp() {
 
   let body, modalsHost = null;
   if (propertyProfileId) {
-    body = <PropertyProfileDetail profileId={propertyProfileId} session={session} onBack={() => setPropertyProfileId(null)} />;
+    body = <PropertyProfileDetail profileId={propertyProfileId} session={session} onBack={() => setPropertyProfileId(null)} isTechnician technician={technician} />;
   } else if (historyFor) {
     body = <CustomerHistoryScreen customerId={historyFor.customerId} customerName={historyFor.name} session={session} onBack={() => setHistoryFor(null)} />;
   } else if (openCustomerId && currentCustomer) {
@@ -3421,6 +3421,59 @@ function InspectionModeModal({ profile, session, onClose, onSaved, onOpenSystem 
   );
 }
 
+// What a real estate agent might actually need from Luxury Comfort Solutions around a
+// transaction — the 5 core service lines plus common pre-close/post-close add-ons.
+const REAL_ESTATE_SERVICE_TYPES = [
+  "Home Inspection", "HVAC", "Electrical", "Plumbing", "Radon",
+  "Water Heater Inspection", "Sewer Scope", "Move-In Safety Check", "Maintenance Plan Enrollment", "Other",
+];
+
+function SubmitRealEstateRequestModal({ profile, session, technician, onClose, onSaved }) {
+  const [services, setServices] = useState([]);
+  const [agentName, setAgentName] = useState("");
+  const [agentContact, setAgentContact] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 10, borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14 };
+  const toggle = (v) => setServices((s) => (s.includes(v) ? s.filter((x) => x !== v) : [...s, v]));
+  const save = async () => {
+    if (services.length === 0) { setError("Select at least one service."); return; }
+    setSaving(true); setError(null);
+    try {
+      await writeRow("property_profile_requests", {
+        id: crypto.randomUUID(), property_profile_id: profile.id, requested_service_types: services,
+        agent_name: agentName.trim() || null, agent_contact: agentContact.trim() || null, notes: notes.trim() || null,
+        submitted_by_user_id: session.user.id, submitted_by_technician_id: technician?.id || null,
+      }, { token: session.access_token });
+      onSaved(); onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal onClose={onClose} maxWidth={440}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 4 }}>Submit for Review</div>
+      <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginBottom: 14 }}>Let the office know what this real estate agent needs at this property.</div>
+      <SectionLabel>What Is This For?</SectionLabel>
+      <TagChips options={REAL_ESTATE_SERVICE_TYPES} selected={services} onToggle={toggle} />
+      <div style={{ height: 14 }} />
+      <SectionLabel>Agent Name (optional)</SectionLabel>
+      <input style={inputStyle} value={agentName} onChange={(e) => setAgentName(e.target.value)} />
+      <div style={{ height: 10 }} />
+      <SectionLabel>Agent Phone / Email (optional)</SectionLabel>
+      <input style={inputStyle} value={agentContact} onChange={(e) => setAgentContact(e.target.value)} />
+      <div style={{ height: 10 }} />
+      <SectionLabel>Notes (optional)</SectionLabel>
+      <textarea rows={2} style={{ ...inputStyle, resize: "none" }} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Submitting…" : "📤 Submit for Review"}</PrimaryButton></div>
+    </Modal>
+  );
+}
+
 function PropertyAgentSection({ profile, session, documents, uploading, fileRef, onUpload, onSaved }) {
   const [buyer, setBuyer] = useState(profile.buyer_name || "");
   const [seller, setSeller] = useState(profile.seller_name || "");
@@ -3477,7 +3530,7 @@ function PropertyAgentSection({ profile, session, documents, uploading, fileRef,
   );
 }
 
-function PropertyProfileDetail({ profileId, session, onBack }) {
+function PropertyProfileDetail({ profileId, session, onBack, isTechnician, technician }) {
   const [profile, setProfile] = useState(null);
   const [sources, setSources] = useState([]);
   const [systems, setSystems] = useState({});
@@ -3493,6 +3546,7 @@ function PropertyProfileDetail({ profileId, session, onBack }) {
   const [systemModal, setSystemModal] = useState(null);
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [inspectionOpen, setInspectionOpen] = useState(false);
+  const [submitOpen, setSubmitOpen] = useState(false);
   const fileRef = useRef(null);
   const [uploading, setUploading] = useState(false);
 
@@ -3583,9 +3637,10 @@ function PropertyProfileDetail({ profileId, session, onBack }) {
           ].filter(Boolean).join(" | ") || "Details not yet available"}
         </div>
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-          <div style={{ flex: 1 }}><PrimaryButton full onClick={() => setInspectionOpen(true)}>🔎 Start Home Inspection</PrimaryButton></div>
-          <div style={{ flex: 1 }}><GhostButton full onClick={() => window.print()}>🖨️ Print / PDF Report</GhostButton></div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 140 }}><PrimaryButton full onClick={() => setInspectionOpen(true)}>🔎 Start Home Inspection</PrimaryButton></div>
+          <div style={{ flex: 1, minWidth: 140 }}><GhostButton full onClick={() => window.print()}>🖨️ Print / PDF Report</GhostButton></div>
+          {isTechnician && <div style={{ flex: 1, minWidth: 140 }}><GhostButton full onClick={() => setSubmitOpen(true)}>📤 Submit for Review</GhostButton></div>}
         </div>
 
         <Card style={{ marginBottom: 16 }}>
@@ -3686,6 +3741,10 @@ function PropertyProfileDetail({ profileId, session, onBack }) {
         <InspectionModeModal profile={profile} session={session} onClose={() => setInspectionOpen(false)} onSaved={load}
           onOpenSystem={(key) => { setInspectionOpen(false); setSystemModal(key); }} />
       )}
+      {submitOpen && (
+        <SubmitRealEstateRequestModal profile={profile} session={session} technician={technician} onClose={() => setSubmitOpen(false)}
+          onSaved={() => alert("Submitted — the office will review this shortly.")} />
+      )}
     </div>
   );
 }
@@ -3768,10 +3827,74 @@ function PropertyProfilesListScreen({ session, onOpen }) {
   );
 }
 
-function PropertyProfilesPanel({ session }) {
-  const [openId, setOpenId] = useState(null);
-  if (openId) return <PropertyProfileDetail profileId={openId} session={session} onBack={() => setOpenId(null)} />;
-  return <PropertyProfilesListScreen session={session} onOpen={setOpenId} />;
+// Admin-facing review queue for the technician "Submit for Review" flow — a separate section
+// from Property Profiles itself so a new agent request never gets lost among ordinary edits.
+function RealEstateSubmissionsPanel({ session, onOpenProfile, onReviewed }) {
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    restRequest(`property_profile_requests?select=*,property_profiles(id,address_line1,city,state,postal_code)&order=created_at.desc`, { token: session.access_token })
+      .then((rows) => setRequests(rows || [])).finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, []);
+
+  const setStatus = async (req, status) => {
+    await patchRow("property_profile_requests", `id=eq.${req.id}`, {
+      status, reviewed_at: new Date().toISOString(), reviewed_by_user_id: session.user.id,
+    }, { token: session.access_token });
+    load();
+    onReviewed?.();
+  };
+
+  const newCount = requests.filter((r) => r.status === "new").length;
+
+  return (
+    <div>
+      <Card style={{ marginBottom: 16, background: newCount > 0 ? "#FFF7E8" : "#fff", border: newCount > 0 ? "1.5px solid #E8C97A" : `1px solid ${C.line}` }}>
+        <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 15, color: newCount > 0 ? "#8A5A15" : C.ink }}>
+          {newCount > 0 ? `🔔 ${newCount} New Submission${newCount === 1 ? "" : "s"}` : "No new submissions"}
+        </div>
+        <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 4 }}>Requests a technician submitted on behalf of a real estate agent.</div>
+      </Card>
+
+      {loading ? <div style={{ fontFamily: BODY, color: C.ash }}>Loading…</div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {requests.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No real estate submissions yet.</div>}
+          {requests.map((r) => {
+            const sc = statusColor(humanize(r.status));
+            const p = r.property_profiles;
+            return (
+              <Card key={r.id}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14.5 }}>{p ? p.address_line1 : "Property"}</div>
+                    {p && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>{p.city}, {p.state} {p.postal_code}</div>}
+                  </div>
+                  <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                  {(r.requested_service_types || []).map((s) => (
+                    <span key={s} style={{ fontFamily: BODY, fontWeight: 700, fontSize: 11.5, background: "#F1EBE0", color: C.ink, borderRadius: 999, padding: "3px 9px" }}>{s}</span>
+                  ))}
+                </div>
+                {(r.agent_name || r.agent_contact) && (
+                  <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 8 }}>Agent: {r.agent_name || "—"}{r.agent_contact ? ` · ${r.agent_contact}` : ""}</div>
+                )}
+                {r.notes && <div style={{ fontFamily: BODY, fontSize: 12.5, marginTop: 6 }}>{r.notes}</div>}
+                <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, marginTop: 6 }}>Submitted {formatFullDate((r.created_at || "").slice(0, 10))}</div>
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  {p && <div style={{ flex: 1 }}><GhostButton full onClick={() => onOpenProfile(p.id)}>View Property</GhostButton></div>}
+                  {r.status === "new" && <div style={{ flex: 1 }}><PrimaryButton full onClick={() => setStatus(r, "reviewed")}>Mark Reviewed</PrimaryButton></div>}
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ============================= ADMIN PORTAL ============================= */
@@ -4112,6 +4235,14 @@ function AdminPortal() {
   const [d, setD] = useState(null); // all admin data
   const [quickFilter, setQuickFilter] = useState(null); // { tab, predicate, label }
   const goTo = (tabKey, filter) => { setTab(tabKey); setQuickFilter(filter || null); };
+  const [fullScreenProfileId, setFullScreenProfileId] = useState(null);
+  const [newRealEstateCount, setNewRealEstateCount] = useState(0);
+  const refreshRealEstateCount = () => {
+    if (!session) return;
+    restRequest(`property_profile_requests?select=id&status=eq.new`, { token: session.access_token })
+      .then((rows) => setNewRealEstateCount((rows || []).length)).catch(() => {});
+  };
+  useEffect(() => { refreshRealEstateCount(); }, [session]);
 
   // Generic Add/Edit/Delete modal state, driven by ENTITY_SPECS (see getEntitySpecs above).
   const [modal, setModal] = useState(null); // { kind: "create"|"edit"|"delete", entity, row }
@@ -4284,6 +4415,7 @@ function AdminPortal() {
     { key: "plans", label: "Plans & Promotions", icon: Tag },
     { key: "technicians", label: "Technicians", icon: Truck },
     { key: "properties", label: "Property Profiles", icon: Home },
+    { key: "realestate", label: "Real Estate", icon: ClipboardCheck, badge: newRealEstateCount },
     { key: "settings", label: "Settings", icon: Settings },
   ];
 
@@ -4305,7 +4437,10 @@ function AdminPortal() {
           {tabs.map(t => (
             <div key={t.key} onClick={() => goTo(t.key)} style={{ display: "flex", gap: 10, alignItems: "center", padding: "10px 10px", borderRadius: 10, cursor: "pointer", background: tab === t.key ? "#F1EBE0" : "transparent" }}>
               <t.icon size={16} color={tab === t.key ? C.terracotta : C.ash} />
-              <span style={{ fontFamily: BODY, fontSize: 13, fontWeight: 600, color: tab === t.key ? C.ink : C.ash }}>{t.label}</span>
+              <span style={{ fontFamily: BODY, fontSize: 13, fontWeight: 600, color: tab === t.key ? C.ink : C.ash, flex: 1 }}>{t.label}</span>
+              {!!t.badge && (
+                <span style={{ fontFamily: BODY, fontWeight: 700, fontSize: 11, color: "#fff", background: C.maple, borderRadius: 999, minWidth: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px" }}>{t.badge}</span>
+              )}
             </div>
           ))}
         </div>
@@ -4555,7 +4690,9 @@ function AdminPortal() {
           </>
         )}
 
-        {tab === "properties" && <PropertyProfilesPanel session={session} />}
+        {tab === "properties" && <PropertyProfilesListScreen session={session} onOpen={setFullScreenProfileId} />}
+
+        {tab === "realestate" && <RealEstateSubmissionsPanel session={session} onOpenProfile={setFullScreenProfileId} onReviewed={refreshRealEstateCount} />}
 
         {tab === "settings" && (
           <>
@@ -4687,6 +4824,12 @@ function AdminPortal() {
           />
         );
       })()}
+
+      {fullScreenProfileId && (
+        <div style={{ position: "fixed", inset: 0, background: C.cream, zIndex: 500, overflowY: "auto" }}>
+          <PropertyProfileDetail profileId={fullScreenProfileId} session={session} onBack={() => setFullScreenProfileId(null)} />
+        </div>
+      )}
     </div>
   );
 }
