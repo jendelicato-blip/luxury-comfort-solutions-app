@@ -1274,8 +1274,52 @@ function MembershipPlanCard({ plan, cycle, isCurrent, onChoose, loading }) {
   );
 }
 
-function MembershipPlansScreen({ nav, plans, membership, onChoose, loading, error }) {
+function MembershipConfirmModal({ plan, cycle, isSwitch, onConfirm, onClose, loading, error }) {
+  const price = cycle === "annual" ? plan.annual_price : plan.monthly_price;
+  const unit = cycle === "annual" ? "/year" : "/month";
+  const today = new Date();
+  const renewal = new Date(today);
+  if (cycle === "annual") renewal.setFullYear(renewal.getFullYear() + 1); else renewal.setMonth(renewal.getMonth() + 1);
+  return (
+    <Modal onClose={onClose} maxWidth={400}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 4 }}>Confirm Your Plan</div>
+      <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginBottom: 14 }}>
+        {isSwitch ? "This will replace your current membership." : "Review the details before you sign up."}
+      </div>
+      <Card style={{ background: "#F8F5EF", marginBottom: 14 }}>
+        <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 17 }}>{plan.name}</div>
+        <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 2 }}>{plan.tagline}</div>
+        <div style={{ marginTop: 10 }}>
+          <span style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 24 }}>${price}</span>
+          <span style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{unit}</span>
+        </div>
+        <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash, marginTop: 4 }}>
+          Billed {cycle === "annual" ? "annually" : "monthly"} · Starts today · Renews {formatFullDate(toISODate(renewal))}
+        </div>
+      </Card>
+      <div style={{ fontFamily: DISPLAY, fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.ash, marginBottom: 8 }}>Included</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+        {(plan.benefits || []).map((b) => (
+          <div key={b} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontFamily: BODY, fontSize: 13 }}>
+            <CheckCircle2 size={15} color={C.leaf} style={{ marginTop: 1, flexShrink: 0 }} /> <span>{b}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, marginBottom: 14, lineHeight: 1.5 }}>
+        No payment is collected in this app — billing is handled through Luxury Comfort Solutions' standard process. Confirming records your membership right away and it's visible to our office immediately.
+      </div>
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginBottom: 10 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ flex: 1 }}><GhostButton full onClick={onClose}>Cancel</GhostButton></div>
+        <div style={{ flex: 1 }}><PrimaryButton full disabled={loading} onClick={onConfirm}>{loading ? "Confirming…" : "Confirm & Sign Up"}</PrimaryButton></div>
+      </div>
+    </Modal>
+  );
+}
+
+function MembershipPlansScreen({ nav, plans, membership, onChoose, loading, error, onClearError }) {
   const [cycle, setCycle] = useState("monthly");
+  const [confirmSel, setConfirmSel] = useState(null);
   return (
     <div style={{ height: "100%", overflowY: "auto" }}>
       <AppBar title="Membership Plans" onBack={() => nav(membership ? "plan" : "home")} />
@@ -1295,8 +1339,6 @@ function MembershipPlansScreen({ nav, plans, membership, onChoose, loading, erro
           ))}
         </div>
 
-        {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginBottom: 12 }}>{error}</div>}
-
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {plans.map((p) => (
             <MembershipPlanCard
@@ -1305,7 +1347,7 @@ function MembershipPlansScreen({ nav, plans, membership, onChoose, loading, erro
               cycle={cycle}
               isCurrent={membership && membership.status === "active" && membership.maintenance_plan_id === p.id}
               loading={loading}
-              onChoose={(plan) => onChoose(plan, cycle)}
+              onChoose={(plan) => { onClearError?.(); setConfirmSel({ plan, cycle }); }}
             />
           ))}
         </div>
@@ -1314,6 +1356,18 @@ function MembershipPlansScreen({ nav, plans, membership, onChoose, loading, erro
           Billing shown here is illustrative. Payment processing (Stripe) is a future integration — no card is charged in this app today.
         </div>
       </div>
+
+      {confirmSel && (
+        <MembershipConfirmModal
+          plan={confirmSel.plan}
+          cycle={confirmSel.cycle}
+          isSwitch={!!membership}
+          loading={loading}
+          error={error}
+          onClose={() => setConfirmSel(null)}
+          onConfirm={() => onChoose(confirmSel.plan, confirmSel.cycle)}
+        />
+      )}
     </div>
   );
 }
@@ -1852,7 +1906,7 @@ function CustomerApp() {
   else if (screen === "equipment") body = <EquipmentScreen nav={nav} equipment={data.equipment} />;
   else if (screen === "history") body = <HistoryScreen nav={nav} serviceRecords={data.serviceRecords} />;
   else if (screen === "plan") body = <MembershipDashboardScreen nav={nav} membership={data.membership} plan={data.plan} serviceRecords={data.serviceRecords} onCancel={cancelMembership} cancelLoading={planActionLoading} />;
-  else if (screen === "membershipPlans") body = <MembershipPlansScreen nav={nav} plans={data.plans} membership={data.membership} onChoose={chooseMembershipPlan} loading={planActionLoading} error={planActionError} />;
+  else if (screen === "membershipPlans") body = <MembershipPlansScreen nav={nav} plans={data.plans} membership={data.membership} onChoose={chooseMembershipPlan} loading={planActionLoading} error={planActionError} onClearError={() => setPlanActionError(null)} />;
   else if (screen === "reminders") body = <RemindersScreen nav={nav} reminders={data.reminders} onOrder={() => nav("orderFilters")} onDismiss={dismissReminder} onComplete={completeReminder} />;
   else if (screen === "promotions") body = <PromotionsScreen nav={nav} promotions={data.promotions} />;
   else if (screen === "financing") body = <FinancingScreen nav={nav} />;
