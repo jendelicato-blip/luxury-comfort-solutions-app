@@ -3114,6 +3114,42 @@ const HOME_SYSTEM_DEFS = {
   },
 };
 const INSPECTION_AREAS = ["Attic", "Basement", "Crawlspace", "Roof", "Windows", "Exterior", "Garage", "Other"];
+
+// Common-answer quick-picks for Home System fields, same tap-to-pick pattern as the Property
+// Overview/Location fields. Fields with no natural common-answer set (model, serial number,
+// dates, free-text "other equipment") are left as direct write-in. A field whose HOME_SYSTEM_DEFS
+// entry is already type "select" reuses its own options list automatically — no entry needed here.
+const HOME_SYSTEM_FIELD_QUICK_OPTIONS = {
+  hvac: {
+    heating_system: ["Forced Air (Gas)", "Forced Air (Electric)", "Heat Pump", "Boiler / Radiant", "Baseboard Electric", "Geothermal"],
+    cooling_system: ["Central Air", "Heat Pump", "Ductless Mini-Split", "Window / Wall Units", "None"],
+    equipment_age: ["1", "3", "5", "8", "10", "15", "20", "20+"],
+    manufacturer: ["Carrier", "Trane", "Lennox", "Rheem", "Goodman", "American Standard", "York", "Bryant", "Amana"],
+    tonnage: ["1.5 Ton", "2 Ton", "2.5 Ton", "3 Ton", "3.5 Ton", "4 Ton", "5 Ton"],
+    furnace_btu: ["40,000", "60,000", "80,000", "100,000", "120,000"],
+    refrigerant: ["R-410A", "R-22", "R-32", "R-454B"],
+    efficiency: ["80% AFUE", "90% AFUE", "95% AFUE", "13 SEER", "14 SEER", "16 SEER", "18 SEER+"],
+  },
+  plumbing: {
+    water_heater: ["Tank - Gas", "Tank - Electric", "Tankless - Gas", "Tankless - Electric", "Heat Pump Water Heater"],
+    water_heater_age: ["1", "3", "5", "8", "10", "15", "20+"],
+    water_supply: ["Public / Municipal", "Private Well"],
+    sewer: ["Public Sewer", "Septic System"],
+  },
+  electrical: {
+    panel: ["Circuit Breaker Panel", "Fuse Box"],
+    panel_amperage: ["100 Amp", "150 Amp", "200 Amp", "225 Amp", "400 Amp"],
+    panel_manufacturer: ["Square D", "Siemens", "Eaton", "GE", "Cutler-Hammer", "Federal Pacific"],
+  },
+  radon: {
+    radon_level: ["Below 2.0 pCi/L", "2.0–4.0 pCi/L", "4.0–6.0 pCi/L", "Above 6.0 pCi/L"],
+    fan: ["RadonAway", "Fantech", "Other Brand", "None"],
+  },
+};
+function homeSystemQuickOptions(systemType, f) {
+  if (f.type === "select") return f.options;
+  return HOME_SYSTEM_FIELD_QUICK_OPTIONS[systemType]?.[f.key];
+}
 const HISTORY_EVENT_TYPES = ["built", "sale", "listing", "service", "inspection", "estimate", "repair", "replacement", "hvac_evaluation", "other"];
 
 function homeSystemStatusDot(system) {
@@ -3289,7 +3325,7 @@ function HomeSystemFormModal({ profileId, systemType, existing, session, onClose
   const [tier, setTier] = useState(existing?.verification_tier && existing.verification_tier !== "unknown" ? existing.verification_tier : "user_entered");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
-  const set = (k, v) => setDetails((d) => ({ ...d, [k]: v }));
+  const [editFieldKey, setEditFieldKey] = useState(null);
   const inputStyle = { width: "100%", fontFamily: BODY, padding: 10, borderRadius: 10, border: `1.5px solid ${C.line}`, fontSize: 14 };
   const save = async () => {
     setSaving(true); setError(null);
@@ -3301,36 +3337,40 @@ function HomeSystemFormModal({ profileId, systemType, existing, session, onClose
       onSaved(); onClose();
     } catch (e) { setError(e.message); } finally { setSaving(false); }
   };
+  const activeField = def.fields.find((f) => f.key === editFieldKey);
   return (
     <Modal onClose={onClose} maxWidth={440}>
       <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>{def.label}</div>
       <SectionLabel>Verified By</SectionLabel>
-      <select style={{ ...inputStyle, marginBottom: 14 }} value={tier} onChange={(e) => setTier(e.target.value)}>
+      <select style={{ ...inputStyle, marginBottom: 4 }} value={tier} onChange={(e) => setTier(e.target.value)}>
         <option value="user_entered">User Entered</option>
         <option value="inspection">Inspection</option>
         <option value="technician_verified">Technician-Verified</option>
       </select>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div>
         {def.fields.map((f) => (
-          <div key={f.key}>
-            <SectionLabel>{f.label}</SectionLabel>
-            {f.type === "select" ? (
-              <select style={inputStyle} value={details[f.key] || ""} onChange={(e) => set(f.key, e.target.value)}>
-                <option value="">Select…</option>
-                {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
-              </select>
-            ) : (
-              <input style={inputStyle} type={f.type === "number" ? "number" : f.type === "date" ? "date" : "text"} value={details[f.key] || ""} onChange={(e) => set(f.key, e.target.value)} />
-            )}
+          <div key={f.key} onClick={() => setEditFieldKey(f.key)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: `1px solid ${C.line}`, cursor: "pointer" }}>
+            <div>
+              <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>{f.label}</div>
+              <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14.5, color: details[f.key] ? C.ink : C.ash }}>{details[f.key] || "Tap to set"}</div>
+            </div>
+            <ChevronRight size={18} color={C.ash} />
           </div>
         ))}
-        <div>
-          <SectionLabel>Notes</SectionLabel>
-          <textarea rows={2} style={{ ...inputStyle, resize: "none" }} value={notes} onChange={(e) => setNotes(e.target.value)} />
-        </div>
+      </div>
+      <div style={{ marginTop: 14 }}>
+        <SectionLabel>Notes</SectionLabel>
+        <textarea rows={2} style={{ ...inputStyle, resize: "none" }} value={notes} onChange={(e) => setNotes(e.target.value)} />
       </div>
       {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
       <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</PrimaryButton></div>
+
+      {activeField && (
+        <FieldEditModal label={activeField.label} type={activeField.type} initial={details[activeField.key] || ""}
+          quickOptions={homeSystemQuickOptions(systemType, activeField)}
+          onSave={(v) => { setDetails((d) => ({ ...d, [activeField.key]: v })); setEditFieldKey(null); }}
+          onClose={() => setEditFieldKey(null)} saving={false} error={null} />
+      )}
     </Modal>
   );
 }
