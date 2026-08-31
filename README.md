@@ -39,6 +39,23 @@ somewhere without that sandbox restriction — i.e., a real dev server — to ac
 - **Admin portal**: log in, dashboard KPIs (including live MRR/ARR from real membership data),
   manage/assign service requests, advance orders, view customers/appointments/products/reminders/
   promotions/technicians, toggle business settings
+- **Property Profiles** (Admin Portal → Property Profiles, and linked from a technician's job):
+  enter an address and "Find Property" to auto-populate what's genuinely available for free —
+  county, lat/long, and normalized address via the US Census Bureau's free geocoder, and flood
+  zone via FEMA's public NFHL service. There is no free, unified, nationwide source for
+  parcel-level data (square footage, beds/baths, year built, assessed value, tax/sale history,
+  zoning, HOA) — those fields correctly show "Not available" until either a paid provider is
+  configured (see below) or someone enters them manually. Every field tracks its source, so
+  automatic data, a paid provider, and a manual correction never get silently confused, and a
+  conflicting value is flagged for the user to resolve rather than overwritten. Includes a Home
+  Systems section (HVAC/Plumbing/Electrical/Radon) with a verification tier
+  (unknown → inspection → technician-verified), a guided "Start Home Inspection" mode that flags
+  a square-footage discrepancy against the record instead of silently replacing it, a property
+  history timeline, document uploads, and agent/transaction fields. "Generate PDF" and "Share"
+  use the browser's own Print (works normally on the live site — the "print doesn't work" issue
+  from the business-plan Artifact was specific to the Artifacts viewer sandbox, not this app) and
+  a copy-to-clipboard summary, respectively — there's no page routing in this single-page app to
+  support a real shareable link yet.
 
 ## Setup
 
@@ -116,6 +133,17 @@ Email → "Confirm email") for faster local testing.
    equipment only supports typed fields, not photographing the equipment label — the job's
    general Photos feature covers photo capture, it just isn't linked to a specific equipment row
    yet.
+8. ~~**Property Profiles**~~ — done. See "Property Profiles" above. **To activate the paid
+   property-data tier** (parcel/APN, sqft, beds/baths, assessed value, tax/sale history, etc. from
+   a provider like RentCast or ATTOM): add a `PROPERTY_DATA_API_KEY` secret to the
+   `lookup-property` Edge Function in the Supabase dashboard, then fill in the provider's fetch
+   call and field mapping in the clearly-marked stub block inside
+   `supabase/functions/lookup-property/index.ts` (Edge Functions → lookup-property → Code in the
+   dashboard, since this project doesn't check function source into the repo). Nothing else needs
+   to change — the frontend, schema, and source-tracking already handle a `paid_api` source.
+   There's no "real estate agent" or "homeowner" login in this app — the feature lives in the
+   Admin Portal and on the technician's job screen, used by Luxury Comfort Solutions staff working
+   with an agent/inspector/homeowner rather than giving them their own account.
 
 ## Project structure
 
