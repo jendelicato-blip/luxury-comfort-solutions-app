@@ -38,7 +38,11 @@ somewhere without that sandbox restriction — i.e., a real dev server — to ac
   photos, and status changes made with poor signal and syncs automatically once back online
 - **Admin portal**: log in, dashboard KPIs (including live MRR/ARR from real membership data),
   manage/assign service requests, advance orders, view customers/appointments/products/reminders/
-  promotions/technicians, toggle business settings
+  promotions/technicians, toggle business settings. Built as a desktop two-pane dashboard
+  (fixed sidebar + content), but responsive below ~700px width — the sidebar collapses behind a
+  menu button and content takes the full screen, so it's usable on an actual phone too. Every
+  modal throughout the app (admin CRUD, Property Profile fields, invites, etc.) has an explicit
+  ✕ close button, not just tap-the-backdrop.
 - **Property Profiles** (Admin Portal → Property Profiles, and linked from a technician's job):
   enter an address and "Find Property" to auto-populate what's genuinely available for free —
   county, lat/long, and normalized address via the US Census Bureau's free geocoder, and flood
