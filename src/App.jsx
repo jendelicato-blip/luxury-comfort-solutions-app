@@ -2998,6 +2998,22 @@ const RECORDS_FIELD_KEYS = ["parcel_number", "county", "assessed_value", "annual
 const LOCATION_FIELD_KEYS = ["heating_type", "cooling_type", "sewer_type", "water_source", "zoning", "flood_zone", "school_district", "latitude", "longitude"];
 const NUMERIC_FIELD_TYPES = ["number", "sqft", "acres", "currency", "year", "coord"];
 
+// Common-answer quick-picks for the Property Overview fields, so most entries need zero typing.
+// "Write In Your Own" always remains available for anything outside these.
+const FIELD_QUICK_OPTIONS = {
+  total_sqft: ["1000", "1200", "1500", "1800", "2000", "2500", "3000", "3500", "4000", "5000"],
+  finished_sqft: ["1000", "1200", "1500", "1800", "2000", "2500", "3000", "3500", "4000", "5000"],
+  lot_size_acres: ["0.15", "0.25", "0.33", "0.5", "1", "2", "5", "10"],
+  year_built: ["1950", "1960", "1970", "1980", "1990", "2000", "2010", "2020"],
+  bedrooms: ["1", "2", "3", "4", "5", "6"],
+  bathrooms: ["1", "1.5", "2", "2.5", "3", "3.5", "4"],
+  stories: ["1", "1.5", "2", "2.5", "3"],
+  garage_size: ["None", "1-Car", "2-Car", "3-Car", "4-Car"],
+  property_type: ["Single Family", "Townhouse", "Condo", "Multi-Family", "Manufactured / Mobile Home"],
+  construction_type: ["Wood Frame", "Brick", "Concrete Block", "Steel Frame", "Masonry"],
+  exterior_materials: ["Vinyl Siding", "Brick", "Stucco", "Wood Siding", "Fiber Cement", "Stone Veneer"],
+};
+
 function formatFullDate(iso) {
   if (!iso) return "";
   return new Date(`${iso}T00:00:00`).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
@@ -3153,23 +3169,43 @@ async function resolveFieldConflict(profileId, fieldName, chosenRow, allCurrentR
   await patchRow("property_profiles", `id=eq.${profileId}`, { [fieldName]: chosenRow.value }, { token });
 }
 
-function FieldEditModal({ label, type, initial, onSave, onClose, saving, error }) {
-  const [value, setValue] = useState(type === "bool" ? (initial === true) : (initial ?? ""));
+function FieldEditModal({ label, type, initial, quickOptions, onSave, onClose, saving, error }) {
+  const hasQuick = type !== "bool" && quickOptions && quickOptions.length > 0;
+  const [customMode, setCustomMode] = useState(!hasQuick);
+  const [value, setValue] = useState(type === "bool" ? initial === true : initial ?? "");
   const inputStyle = { width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 15 };
   const inputType = NUMERIC_FIELD_TYPES.includes(type) ? "number" : type === "date" ? "date" : "text";
   return (
     <Modal onClose={onClose} maxWidth={380}>
       <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 14 }}>Edit {label}</div>
+
       {type === "bool" ? (
-        <select value={String(value)} onChange={(e) => setValue(e.target.value === "true")} style={inputStyle}>
-          <option value="true">Yes</option>
-          <option value="false">No</option>
-        </select>
+        <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ flex: 1 }}><PrimaryButton full disabled={saving} onClick={() => onSave(true)}>Yes</PrimaryButton></div>
+          <div style={{ flex: 1 }}><GhostButton full onClick={() => onSave(false)}>No</GhostButton></div>
+        </div>
+      ) : !customMode ? (
+        <>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {quickOptions.map((opt) => (
+              <div key={opt} onClick={() => !saving && onSave(opt)} style={{
+                padding: "10px 14px", borderRadius: 999, cursor: saving ? "default" : "pointer",
+                fontFamily: BODY, fontWeight: 700, fontSize: 13.5, background: "#F1EBE0", color: C.ink, opacity: saving ? 0.6 : 1,
+              }}>{opt}</div>
+            ))}
+          </div>
+          <div onClick={() => !saving && setCustomMode(true)} style={{ marginTop: 14, fontFamily: BODY, fontWeight: 700, fontSize: 13, color: C.terracotta, cursor: "pointer" }}>✏️ Write In Your Own</div>
+          {saving && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 10 }}>Saving…</div>}
+        </>
       ) : (
-        <input style={inputStyle} type={inputType} value={value} onChange={(e) => setValue(e.target.value)} />
+        <>
+          <input style={inputStyle} type={inputType} value={value} onChange={(e) => setValue(e.target.value)} placeholder={`Enter ${label.toLowerCase()}`} autoFocus />
+          {hasQuick && <div onClick={() => setCustomMode(false)} style={{ marginTop: 10, fontFamily: BODY, fontWeight: 700, fontSize: 12.5, color: C.ash, cursor: "pointer" }}>← Back to common answers</div>}
+          <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={() => onSave(value)}>{saving ? "Saving…" : "Save"}</PrimaryButton></div>
+        </>
       )}
+
       {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
-      <div style={{ marginTop: 16 }}><PrimaryButton full disabled={saving} onClick={() => onSave(value)}>{saving ? "Saving…" : "Save"}</PrimaryButton></div>
     </Modal>
   );
 }
@@ -3626,7 +3662,7 @@ function PropertyProfileDetail({ profileId, session, onBack }) {
       </div>
 
       {editField && (
-        <FieldEditModal label={editField.label} type={editField.type} initial={editField.value} onClose={() => { setEditField(null); setFieldSaveError(null); }}
+        <FieldEditModal label={editField.label} type={editField.type} initial={editField.value} quickOptions={FIELD_QUICK_OPTIONS[editField.key]} onClose={() => { setEditField(null); setFieldSaveError(null); }}
           onSave={saveFieldEdit} saving={fieldSaveBusy} error={fieldSaveError} />
       )}
       {conflictField && (
