@@ -27,7 +27,11 @@ somewhere without that sandbox restriction — i.e., a real dev server — to ac
 
 - **Customer app**: sign up / log in, submit service requests (across 5 service lines), schedule
   appointments, order filters/supplies (no payment — billed to account separately), view
-  equipment/service history/orders/reminders, browse and subscribe to membership plans
+  equipment/service history/orders/reminders, browse and subscribe to membership plans. The home
+  screen has a Membership & Savings section (Membership Plans — showing membership status and
+  renewal date if already a member — Financing, and Rebates) alongside the main action tiles.
+  Choosing or switching a membership plan opens a confirmation step showing the plan, price,
+  billing cycle, and renewal date before it's submitted, rather than signing up immediately on tap.
 - **Technician view**: a mobile-first, one-hand-usable CRM built around the technician's real
   assigned jobs. Today's Jobs / Upcoming with one-tap Start Job, Call, and Directions; a job
   screen surfacing the customer, address, problem, and the property's real equipment (with
