@@ -1602,6 +1602,7 @@ function CustomerApp() {
     try {
       const customerRows = await restRequest(`customers?select=*&user_id=eq.${userId}`, { token });
       const customer = customerRows[0];
+      if (!customer) throw new Error("This account isn't set up as a customer. If you're staff, use the Technician or Admin Portal tab above instead.");
       const properties = await restRequest(`properties?select=*&customer_id=eq.${customer.id}&order=is_primary.desc&limit=1`, { token });
       const property = properties[0];
       const [equipment, serviceLines, products, requests, appointments, orders, reminders, notifications, plans, memberships, serviceRecords, settingsRows, promos, notifPrefs] = await Promise.all([
@@ -1795,8 +1796,9 @@ function CustomerApp() {
   if (!session) return <LoginScreen onSignIn={handleSignIn} onSignUp={handleSignUp} loading={authLoading} error={authError} info={authInfo} />;
   if (dataLoading || !data) {
     return (
-      <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: C.cream }}>
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 28, background: C.cream, textAlign: "center" }}>
         <div style={{ fontFamily: BODY, color: C.ash }}>{authError || "Loading your account…"}</div>
+        {authError && <GhostButton onClick={logOut}>Back to Login</GhostButton>}
       </div>
     );
   }
