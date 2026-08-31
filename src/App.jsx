@@ -537,6 +537,20 @@ function AppBar({ title, onBack }) {
     </div>
   );
 }
+function HomeLinkRow({ icon: Icon, label, sub, onClick }) {
+  return (
+    <div onClick={onClick} style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 12, padding: "13px 14px", background: "#fff", border: `1px solid ${C.line}`, borderRadius: 14, marginBottom: 10 }}>
+      <div style={{ width: 40, height: 40, borderRadius: 12, background: "#F1EBE0", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+        <Icon size={19} color={C.terracotta} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14.5, color: C.ink }}>{label}</div>
+        {sub && <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash, marginTop: 1 }}>{sub}</div>}
+      </div>
+      <ChevronRight size={18} color={C.ash} />
+    </div>
+  );
+}
 function BigAction({ icon: Icon, label, onClick }) {
   return (
     <div onClick={onClick} style={{ cursor: "pointer", flex: "1 1 45%", background: "#fff", border: `1px solid ${C.line}`, borderRadius: 16, padding: "16px 12px", display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
@@ -608,6 +622,11 @@ function CustomerHome({ nav, state }) {
   const openReminders = state.reminders.filter((r) => r.status !== "completed" && r.status !== "dismissed").slice(0, 3);
   const activity = state.notifications.slice(0, 4);
   const promo = state.promotions[0];
+  const membershipSub = state.membership && state.plan
+    ? state.membership.status === "active"
+      ? `Active Member · ${state.plan.name} · Renews ${formatFullDate(state.membership.renewal_date)}`
+      : `${humanize(state.membership.status)} · ${state.plan.name}`
+    : "Not a member yet — browse plans";
   return (
     <div style={{ padding: "16px 18px 90px", overflowY: "auto", height: "100%" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -667,6 +686,13 @@ function CustomerHome({ nav, state }) {
             <div key={a.id || i} style={{ padding: "8px 0", borderBottom: i < activity.length - 1 ? `1px solid ${C.line}` : "none", fontFamily: BODY, fontSize: 13.5 }}>{a.title}</div>
           ))}
         </Card>
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <SectionLabel>Membership & Savings</SectionLabel>
+        <HomeLinkRow icon={Award} label="Membership Plans" sub={membershipSub} onClick={() => nav(state.membership ? "plan" : "membershipPlans")} />
+        <HomeLinkRow icon={DollarSign} label="Financing" sub="Flexible payment options for bigger projects" onClick={() => nav("financing")} />
+        <HomeLinkRow icon={BadgePercent} label="Rebates" sub="See current manufacturer & utility rebates" onClick={() => nav("rebates")} />
       </div>
 
       {promo && (
