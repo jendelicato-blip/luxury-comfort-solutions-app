@@ -2687,6 +2687,7 @@ function FollowUpsScreen({ reminders, customers }) {
 const TECH_TABS = [
   { key: "jobs", label: "Jobs", icon: Wrench },
   { key: "customers", label: "Customers", icon: Users },
+  { key: "realestate", label: "Real Estate", icon: Home },
   { key: "search", label: "Search", icon: Search },
   { key: "followups", label: "Follow-Ups", icon: Bell },
 ];
@@ -2894,6 +2895,15 @@ function TechnicianApp() {
     );
   } else if (tab === "customers") {
     body = <CustomersScreen customers={customers} onOpen={(c) => setOpenCustomerId(c.id)} />;
+  } else if (tab === "realestate") {
+    body = (
+      <div style={{ height: "100%", overflowY: "auto", background: C.cream }}>
+        <AppBar title="Real Estate Agent" />
+        <div style={{ padding: "0 18px 30px" }}>
+          <PropertyProfilesListScreen session={session} onOpen={setPropertyProfileId} />
+        </div>
+      </div>
+    );
   } else if (tab === "search") {
     body = <SearchScreen customers={customers} jobs={jobs} onOpenCustomer={(c) => setOpenCustomerId(c.id)} onOpenJob={openJob} />;
   } else if (tab === "followups") {
