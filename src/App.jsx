@@ -3014,6 +3014,12 @@ const FIELD_QUICK_OPTIONS = {
   property_type: ["Single Family", "Townhouse", "Condo", "Multi-Family", "Manufactured / Mobile Home"],
   construction_type: ["Wood Frame", "Brick", "Concrete Block", "Steel Frame", "Masonry"],
   exterior_materials: ["Vinyl Siding", "Brick", "Stucco", "Wood Siding", "Fiber Cement", "Stone Veneer"],
+  heating_type: ["Forced Air (Gas)", "Forced Air (Electric)", "Heat Pump", "Boiler / Radiant", "Baseboard Electric", "Geothermal"],
+  cooling_type: ["Central Air", "Heat Pump", "Ductless Mini-Split", "Window / Wall Units", "None"],
+  sewer_type: ["Public Sewer", "Septic System"],
+  water_source: ["Public / Municipal", "Private Well"],
+  zoning: ["Residential (R-1)", "Residential (R-2)", "Agricultural", "Commercial", "Mixed Use"],
+  flood_zone: ["Zone X (Minimal Risk)", "Zone A", "Zone AE", "Zone AO", "Zone AH", "Zone VE (Coastal)"],
 };
 
 function formatFullDate(iso) {
