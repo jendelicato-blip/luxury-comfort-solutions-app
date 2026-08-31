@@ -6,7 +6,7 @@ import {
   Settings, BarChart3, Search, ShoppingBag, Package, PhoneCall, Plus, Minus,
   Droplet, Zap, ClipboardCheck, Radiation, DollarSign, BadgePercent,
   Facebook, Instagram, Youtube, Image as ImageIcon, Award,
-  MessageSquare, Navigation, WifiOff, RefreshCw, X, History
+  MessageSquare, Navigation, WifiOff, RefreshCw, X, History, Menu
 } from "lucide-react";
 
 /* ============================= DESIGN TOKENS ============================= */
@@ -27,6 +27,16 @@ const fontLink = (
   <style>{`
     @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Work+Sans:wght@400;500;600;700&display=swap');
     * { box-sizing: border-box; }
+    /* Admin Portal was built as a fixed sidebar + content two-pane desktop dashboard. On a
+       narrow viewport (an actual phone, or a narrow browser window) the sidebar otherwise eats
+       most of the available width, leaving inputs/text squeezed and hard to read/use — this
+       collapses the sidebar behind a menu button instead of splitting the screen. */
+    @media (max-width: 700px) {
+      .admin-menu-btn { display: flex !important; }
+      .admin-sidebar { display: none !important; }
+      .admin-sidebar.open { display: flex !important; position: fixed !important; inset: 0 !important; width: 100% !important; z-index: 600 !important; }
+      .admin-content { width: 100% !important; }
+    }
   `}</style>
 );
 
@@ -3801,10 +3811,10 @@ function PropertyProfilesListScreen({ session, onOpen }) {
         <SectionLabel>Find Property</SectionLabel>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <input style={inputStyle} placeholder="Street address" value={form.address_line1} onChange={(e) => set("address_line1", e.target.value)} />
-          <div style={{ display: "flex", gap: 8 }}>
-            <input style={{ ...inputStyle, flex: 2 }} placeholder="City" value={form.city} onChange={(e) => set("city", e.target.value)} />
-            <input style={{ ...inputStyle, flex: 1 }} placeholder="State" value={form.state} onChange={(e) => set("state", e.target.value)} />
-            <input style={{ ...inputStyle, flex: 1 }} placeholder="ZIP" value={form.postal_code} onChange={(e) => set("postal_code", e.target.value)} />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input style={{ ...inputStyle, flex: 2, minWidth: 120 }} placeholder="City" value={form.city} onChange={(e) => set("city", e.target.value)} />
+            <input style={{ ...inputStyle, flex: 1, minWidth: 70 }} placeholder="State" value={form.state} onChange={(e) => set("state", e.target.value)} />
+            <input style={{ ...inputStyle, flex: 1, minWidth: 70 }} placeholder="ZIP" value={form.postal_code} onChange={(e) => set("postal_code", e.target.value)} />
           </div>
         </div>
         {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
@@ -4115,6 +4125,11 @@ function Modal({ onClose, children, maxWidth = 420 }) {
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(28,27,25,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, borderRadius: 16, padding: 20, maxWidth, width: "100%", maxHeight: "85vh", overflowY: "auto", border: `1px solid ${C.line}` }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: -6 }}>
+          <div onClick={onClose} style={{ width: 30, height: 30, borderRadius: "50%", background: "#F1EBE0", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+            <X size={16} color={C.ink} />
+          </div>
+        </div>
         {children}
       </div>
     </div>
@@ -4236,6 +4251,7 @@ function AdminPortal() {
   const [quickFilter, setQuickFilter] = useState(null); // { tab, predicate, label }
   const goTo = (tabKey, filter) => { setTab(tabKey); setQuickFilter(filter || null); };
   const [fullScreenProfileId, setFullScreenProfileId] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [newRealEstateCount, setNewRealEstateCount] = useState(0);
   const refreshRealEstateCount = () => {
     if (!session) return;
@@ -4430,12 +4446,17 @@ function AdminPortal() {
   const expiringOrCancelled = d.memberships.filter((m) => m.status === "cancelled" || (m.status === "active" && (new Date(m.renewal_date) - new Date()) / 86400000 <= 30));
 
   return (
-    <div style={{ height: "100%", display: "flex", background: C.cream }}>
-      <div style={{ width: 210, borderRight: `1px solid ${C.line}`, background: "#fff", padding: 16, flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
-        <Logo width={128} />
+    <div style={{ height: "100%", display: "flex", background: C.cream, position: "relative" }}>
+      <div className={`admin-sidebar${sidebarOpen ? " open" : ""}`} style={{ width: 210, borderRight: `1px solid ${C.line}`, background: "#fff", padding: 16, flexShrink: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <Logo width={128} />
+          <div onClick={() => setSidebarOpen(false)} style={{ display: sidebarOpen ? "flex" : "none", width: 32, height: 32, borderRadius: 8, background: "#F1EBE0", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>
+            <X size={18} color={C.ink} />
+          </div>
+        </div>
         <div style={{ marginTop: 24, display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
           {tabs.map(t => (
-            <div key={t.key} onClick={() => goTo(t.key)} style={{ display: "flex", gap: 10, alignItems: "center", padding: "10px 10px", borderRadius: 10, cursor: "pointer", background: tab === t.key ? "#F1EBE0" : "transparent" }}>
+            <div key={t.key} onClick={() => { goTo(t.key); setSidebarOpen(false); }} style={{ display: "flex", gap: 10, alignItems: "center", padding: "10px 10px", borderRadius: 10, cursor: "pointer", background: tab === t.key ? "#F1EBE0" : "transparent" }}>
               <t.icon size={16} color={tab === t.key ? C.terracotta : C.ash} />
               <span style={{ fontFamily: BODY, fontSize: 13, fontWeight: 600, color: tab === t.key ? C.ink : C.ash, flex: 1 }}>{t.label}</span>
               {!!t.badge && (
@@ -4447,7 +4468,10 @@ function AdminPortal() {
         <div style={{ fontFamily: BODY, fontSize: 12, color: C.ash, marginBottom: 8 }}>{admin.first_name} {admin.last_name}</div>
         <GhostButton full onClick={logOut}>Log Out</GhostButton>
       </div>
-      <div style={{ flex: 1, padding: 22, overflowY: "auto" }}>
+      <div className="admin-content" style={{ flex: 1, padding: 22, overflowY: "auto" }}>
+        <div className="admin-menu-btn" onClick={() => setSidebarOpen(true)} style={{ display: "none", width: 40, height: 40, borderRadius: 10, background: "#F1EBE0", alignItems: "center", justifyContent: "center", cursor: "pointer", marginBottom: 14 }}>
+          <Menu size={20} color={C.ink} />
+        </div>
         <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 20, marginBottom: 16 }}>{tabs.find(t => t.key === tab).label}</div>
 
         {tab === "dashboard" && (
