@@ -3650,7 +3650,6 @@ function PropertyProfileDetail({ profileId, session, onBack, isTechnician, techn
         <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 140 }}><PrimaryButton full onClick={() => setInspectionOpen(true)}>🔎 Start Home Inspection</PrimaryButton></div>
           <div style={{ flex: 1, minWidth: 140 }}><GhostButton full onClick={() => window.print()}>🖨️ Print / PDF Report</GhostButton></div>
-          {isTechnician && <div style={{ flex: 1, minWidth: 140 }}><GhostButton full onClick={() => setSubmitOpen(true)}>📤 Submit for Review</GhostButton></div>}
         </div>
 
         <Card style={{ marginBottom: 16 }}>
@@ -3731,6 +3730,14 @@ function PropertyProfileDetail({ profileId, session, onBack, isTechnician, techn
 
         {subtab === "agent" && (
           <PropertyAgentSection profile={profile} session={session} documents={documents} uploading={uploading} fileRef={fileRef} onUpload={uploadDoc} onSaved={load} />
+        )}
+
+        {isTechnician && (
+          <button onClick={() => setSubmitOpen(true)} style={{
+            width: "100%", marginTop: 24, fontFamily: BODY, fontWeight: 800, fontSize: 16, color: "#fff",
+            background: C.gold, border: "none", borderRadius: 14, padding: "17px 18px", cursor: "pointer",
+            boxShadow: "0 8px 20px rgba(217,164,65,0.45)",
+          }}>📤 Submit for Review</button>
         )}
       </div>
 
