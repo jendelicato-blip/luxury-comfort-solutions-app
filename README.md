@@ -55,7 +55,15 @@ somewhere without that sandbox restriction — i.e., a real dev server — to ac
   use the browser's own Print (works normally on the live site — the "print doesn't work" issue
   from the business-plan Artifact was specific to the Artifacts viewer sandbox, not this app) and
   a copy-to-clipboard summary, respectively — there's no page routing in this single-page app to
-  support a real shareable link yet.
+  support a real shareable link yet. Opening a property from Admin now opens as its own
+  full-screen page (no sidebar) rather than the constrained admin content pane.
+- **Real Estate Agent submissions**: a technician viewing a Property Profile can tap "📤 Submit
+  for Review" to tell the office what a real estate agent needs at that address — Home
+  Inspection, HVAC, Electrical, Plumbing, Radon, Water Heater Inspection, Sewer Scope, Move-In
+  Safety Check, Maintenance Plan Enrollment, or Other (multi-select), plus optional agent
+  name/contact and notes. These land in a separate **Admin Portal → Real Estate** tab (distinct
+  from Property Profiles) with a live unreviewed-count badge on the sidebar tab itself, so a new
+  submission is never missed among ordinary profile edits.
 
 ## Setup
 
