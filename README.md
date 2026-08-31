@@ -53,7 +53,12 @@ somewhere without that sandbox restriction — i.e., a real dev server — to ac
   automatic data, a paid provider, and a manual correction never get silently confused, and a
   conflicting value is flagged for the user to resolve rather than overwritten. Includes a Home
   Systems section (HVAC/Plumbing/Electrical/Radon) with a verification tier
-  (unknown → inspection → technician-verified), a guided "Start Home Inspection" mode that flags
+  (unknown → inspection → technician-verified) — the same tap-a-field-for-a-bubble-of-common-
+  answers pattern from Property Overview/Location also covers every Home System field where a
+  common-answer set makes sense (e.g. heating system type, water heater type, panel amperage,
+  radon level range), with "Write In Your Own" still available and fields that don't have natural
+  common answers (model, serial number, dates) going straight to a text/number/date entry — a
+  guided "Start Home Inspection" mode that flags
   a square-footage discrepancy against the record instead of silently replacing it, a property
   history timeline, document uploads, and agent/transaction fields. "Generate PDF" and "Share"
   use the browser's own Print (works normally on the live site — the "print doesn't work" issue
