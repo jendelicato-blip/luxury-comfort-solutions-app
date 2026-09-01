@@ -1101,7 +1101,32 @@ function OrdersScreen({ nav, orders }) {
   );
 }
 
-function FinancingScreen({ nav }) {
+function FinancingRequestModal({ onConfirm, onClose, loading, error }) {
+  const [notes, setNotes] = useState("");
+  const inputStyle = { width: "100%", fontFamily: BODY, padding: 12, borderRadius: 12, border: `1.5px solid ${C.line}`, fontSize: 14, resize: "none" };
+  return (
+    <Modal onClose={onClose} maxWidth={400}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, marginBottom: 4 }}>Request Financing Help</div>
+      <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash, marginBottom: 14, lineHeight: 1.5 }}>
+        Someone from our office will reach out to walk through financing options and help you apply — no application happens in this app.
+      </div>
+      <SectionLabel>What's this for? (optional)</SectionLabel>
+      <textarea rows={3} style={inputStyle} placeholder="e.g. New furnace, AC replacement…" value={notes} onChange={(e) => setNotes(e.target.value)} />
+      {error && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.maple, marginTop: 10 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <div style={{ flex: 1 }}><GhostButton full onClick={onClose}>Cancel</GhostButton></div>
+        <div style={{ flex: 1 }}><PrimaryButton full disabled={loading} onClick={() => onConfirm(notes)}>{loading ? "Sending…" : "Send Request"}</PrimaryButton></div>
+      </div>
+    </Modal>
+  );
+}
+
+function FinancingScreen({ nav, existingRequest, onSubmit, loading, error, onClearError }) {
+  const [open, setOpen] = useState(false);
+  const confirm = async (notes) => {
+    const ok = await onSubmit(notes);
+    if (ok) setOpen(false);
+  };
   return (
     <div style={{ height: "100%", overflowY: "auto" }}>
       <AppBar title="Financing" onBack={() => nav("home")} />
@@ -1115,13 +1140,31 @@ function FinancingScreen({ nav }) {
             Luxury Comfort Solutions offers financing through Synchrony for new systems, major repairs, and larger projects — so a big fix doesn't have to mean a big bill all at once.
           </div>
         </Card>
+
+        {existingRequest && (
+          <Card style={{ marginTop: 14, background: "#F8F5EF" }}>
+            <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14 }}>
+              {existingRequest.status === "contacted" ? "✅ We've been in touch" : "📨 Request sent"}
+            </div>
+            <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 4 }}>
+              {existingRequest.status === "contacted"
+                ? "Our office has reached out about your financing request."
+                : `Submitted ${formatFullDate((existingRequest.created_at || "").slice(0, 10))} — someone from our office will reach out shortly.`}
+            </div>
+          </Card>
+        )}
+
         <div style={{ marginTop: 14 }}>
-          <PrimaryButton full>Apply for Financing</PrimaryButton>
+          <PrimaryButton full onClick={() => { onClearError?.(); setOpen(true); }}>
+            {existingRequest ? "Request Financing Help Again" : "Apply for Financing"}
+          </PrimaryButton>
         </div>
         <div style={{ fontFamily: BODY, fontSize: 11.5, color: C.ash, textAlign: "center", marginTop: 10 }}>
-          You'll be connected to Synchrony's secure application. Financing approval and terms are handled by Synchrony, not through this app.
+          We'll contact you directly to help set up financing — no application happens in this app.
         </div>
       </div>
+
+      {open && <FinancingRequestModal loading={loading} error={error} onClose={() => setOpen(false)} onConfirm={confirm} />}
     </div>
   );
 }
@@ -1684,6 +1727,8 @@ function CustomerApp() {
   const [planActionError, setPlanActionError] = useState(null);
   const [addressActionLoading, setAddressActionLoading] = useState(false);
   const [addressActionError, setAddressActionError] = useState(null);
+  const [financingActionLoading, setFinancingActionLoading] = useState(false);
+  const [financingActionError, setFinancingActionError] = useState(null);
 
   const nav = (s, payload) => { setScreen(s); setNavPayload(payload || null); };
 
@@ -1695,7 +1740,7 @@ function CustomerApp() {
       if (!customer) throw new Error("This account isn't set up as a customer. If you're staff, use the Technician or Admin Portal tab above instead.");
       const properties = await restRequest(`properties?select=*&customer_id=eq.${customer.id}&order=is_primary.desc&limit=1`, { token });
       const property = properties[0];
-      const [equipment, serviceLines, products, requests, appointments, orders, reminders, notifications, plans, memberships, serviceRecords, settingsRows, promos, notifPrefs] = await Promise.all([
+      const [equipment, serviceLines, products, requests, appointments, orders, reminders, notifications, plans, memberships, serviceRecords, settingsRows, promos, notifPrefs, financingRequests] = await Promise.all([
         property ? restRequest(`equipment?select=*&property_id=eq.${property.id}`, { token }) : Promise.resolve([]),
         restRequest(`service_lines?select=*&order=sort_order.asc`, { token }),
         restRequest(`products?select=*,product_categories(name)&is_active=eq.true&order=name.asc`, { token }),
@@ -1710,6 +1755,7 @@ function CustomerApp() {
         restRequest(`business_settings?select=*`, { token }),
         restRequest(`promotions?select=*&is_active=eq.true&order=start_date.desc`, { token }),
         restRequest(`notification_preferences?select=*&customer_id=eq.${customer.id}`, { token }),
+        restRequest(`financing_requests?select=*&customer_id=eq.${customer.id}&order=created_at.desc&limit=1`, { token }),
       ]);
       const settings = Object.fromEntries(settingsRows.map((s) => [s.key, s.value]));
       const membership = memberships[0] || null;
@@ -1719,6 +1765,7 @@ function CustomerApp() {
         reminders, notifications, plans, membership, plan, serviceRecords, settings, promotions: promos,
         emergencyEnabled: settings.emergency_service_enabled === true || settings.emergency_service_enabled === "true",
         marketingEnabled: notifPrefs[0] ? notifPrefs[0].marketing_enabled : true,
+        financingRequest: financingRequests[0] || null,
       });
     } catch (e) {
       setAuthError(e.message);
@@ -1862,6 +1909,21 @@ function CustomerApp() {
     }
   };
 
+  const submitFinancingRequest = async (notes) => {
+    setFinancingActionLoading(true); setFinancingActionError(null);
+    try {
+      const body = { customer_id: data.customer.id, property_id: data.property?.id || null, notes: notes.trim() || null };
+      const [request] = await restRequest("financing_requests", { method: "POST", token: session.access_token, body: [body], prefer: "return=representation" });
+      setData((d) => ({ ...d, financingRequest: request }));
+      return true;
+    } catch (e) {
+      setFinancingActionError(e.message);
+      return false;
+    } finally {
+      setFinancingActionLoading(false);
+    }
+  };
+
   const toggleMarketing = async () => {
     const next = !data.marketingEnabled;
     setData((d) => ({ ...d, marketingEnabled: next }));
@@ -1909,7 +1971,7 @@ function CustomerApp() {
   else if (screen === "membershipPlans") body = <MembershipPlansScreen nav={nav} plans={data.plans} membership={data.membership} onChoose={chooseMembershipPlan} loading={planActionLoading} error={planActionError} onClearError={() => setPlanActionError(null)} />;
   else if (screen === "reminders") body = <RemindersScreen nav={nav} reminders={data.reminders} onOrder={() => nav("orderFilters")} onDismiss={dismissReminder} onComplete={completeReminder} />;
   else if (screen === "promotions") body = <PromotionsScreen nav={nav} promotions={data.promotions} />;
-  else if (screen === "financing") body = <FinancingScreen nav={nav} />;
+  else if (screen === "financing") body = <FinancingScreen nav={nav} existingRequest={data.financingRequest} onSubmit={submitFinancingRequest} loading={financingActionLoading} error={financingActionError} onClearError={() => setFinancingActionError(null)} />;
   else if (screen === "rebates") body = <RebatesScreen nav={nav} />;
   else if (screen === "contact") body = <ContactScreen nav={nav} />;
   else if (screen === "notifications") body = <NotificationsScreen nav={nav} notifications={data.notifications} marketingEnabled={data.marketingEnabled} onToggleMarketing={toggleMarketing} />;
@@ -4034,6 +4096,73 @@ function RealEstateSubmissionsPanel({ session, onOpenProfile, onReviewed }) {
   );
 }
 
+// Admin-facing queue for customer "Apply for Financing" requests — surfaces who needs a call
+// back about financing so it's never missed among other customer/service activity.
+function FinancingRequestsPanel({ session, onContacted }) {
+  const [requests, setRequests] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    restRequest(`financing_requests?select=*,customers(first_name,last_name,account_number,users(email,phone)),properties(address_line1,city,state,postal_code)&order=created_at.desc`, { token: session.access_token })
+      .then((rows) => setRequests(rows || [])).finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, []);
+
+  const markContacted = async (req) => {
+    await patchRow("financing_requests", `id=eq.${req.id}`, {
+      status: "contacted", contacted_at: new Date().toISOString(), contacted_by_user_id: session.user.id,
+    }, { token: session.access_token });
+    load();
+    onContacted?.();
+  };
+
+  const newCount = requests.filter((r) => r.status === "new").length;
+
+  return (
+    <div>
+      <Card style={{ marginBottom: 16, background: newCount > 0 ? "#FFF7E8" : "#fff", border: newCount > 0 ? "1.5px solid #E8C97A" : `1px solid ${C.line}` }}>
+        <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 15, color: newCount > 0 ? "#8A5A15" : C.ink }}>
+          {newCount > 0 ? `🔔 ${newCount} Customer${newCount === 1 ? "" : "s"} Need${newCount === 1 ? "s" : ""} a Financing Call` : "No new financing requests"}
+        </div>
+        <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 4 }}>Customers who tapped "Apply for Financing" — reach out to help them get set up with Synchrony.</div>
+      </Card>
+
+      {loading ? <div style={{ fontFamily: BODY, color: C.ash }}>Loading…</div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {requests.length === 0 && <div style={{ fontFamily: BODY, fontSize: 13, color: C.ash }}>No financing requests yet.</div>}
+          {requests.map((r) => {
+            const sc = statusColor(humanize(r.status));
+            const c = r.customers;
+            const p = r.properties;
+            return (
+              <Card key={r.id}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontFamily: BODY, fontWeight: 700, fontSize: 14.5 }}>{c ? `${c.first_name} ${c.last_name}` : "Customer"}</div>
+                    <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash }}>{c?.account_number}</div>
+                  </div>
+                  <Badge color={sc.color} bg={sc.bg}>{humanize(r.status)}</Badge>
+                </div>
+                <div style={{ fontFamily: BODY, fontSize: 13, marginTop: 8 }}>
+                  {c?.users?.phone && <div><b>Phone:</b> {c.users.phone}</div>}
+                  {c?.users?.email && <div><b>Email:</b> {c.users.email}</div>}
+                </div>
+                {p && <div style={{ fontFamily: BODY, fontSize: 12.5, color: C.ash, marginTop: 6 }}>{p.address_line1}, {p.city}, {p.state} {p.postal_code}</div>}
+                {r.notes && <div style={{ fontFamily: BODY, fontSize: 12.5, marginTop: 6 }}>"{r.notes}"</div>}
+                <div style={{ fontFamily: BODY, fontSize: 11, color: C.ash, marginTop: 6 }}>Requested {formatFullDate((r.created_at || "").slice(0, 10))}</div>
+                {r.status === "new" && (
+                  <div style={{ marginTop: 10 }}><PrimaryButton full onClick={() => markContacted(r)}>Mark Contacted</PrimaryButton></div>
+                )}
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============================= ADMIN PORTAL ============================= */
 
 const enumOptions = (values) => values.map((v) => ({ value: v, label: humanize(v) }));
@@ -4386,6 +4515,13 @@ function AdminPortal() {
       .then((rows) => setNewRealEstateCount((rows || []).length)).catch(() => {});
   };
   useEffect(() => { refreshRealEstateCount(); }, [session]);
+  const [newFinancingCount, setNewFinancingCount] = useState(0);
+  const refreshFinancingCount = () => {
+    if (!session) return;
+    restRequest(`financing_requests?select=id&status=eq.new`, { token: session.access_token })
+      .then((rows) => setNewFinancingCount((rows || []).length)).catch(() => {});
+  };
+  useEffect(() => { refreshFinancingCount(); }, [session]);
 
   // Generic Add/Edit/Delete modal state, driven by ENTITY_SPECS (see getEntitySpecs above).
   const [modal, setModal] = useState(null); // { kind: "create"|"edit"|"delete", entity, row }
@@ -4559,6 +4695,7 @@ function AdminPortal() {
     { key: "technicians", label: "Technicians", icon: Truck },
     { key: "properties", label: "Property Profiles", icon: Home },
     { key: "realestate", label: "Real Estate", icon: ClipboardCheck, badge: newRealEstateCount },
+    { key: "financing", label: "Financing Requests", icon: DollarSign, badge: newFinancingCount },
     { key: "settings", label: "Settings", icon: Settings },
   ];
 
@@ -4844,6 +4981,8 @@ function AdminPortal() {
         {tab === "properties" && <PropertyProfilesListScreen session={session} onOpen={setFullScreenProfileId} />}
 
         {tab === "realestate" && <RealEstateSubmissionsPanel session={session} onOpenProfile={setFullScreenProfileId} onReviewed={refreshRealEstateCount} />}
+
+        {tab === "financing" && <FinancingRequestsPanel session={session} onContacted={refreshFinancingCount} />}
 
         {tab === "settings" && (
           <>

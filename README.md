@@ -77,6 +77,12 @@ somewhere without that sandbox restriction — i.e., a real dev server — to ac
   name/contact and notes. These land in a separate **Admin Portal → Real Estate** tab (distinct
   from Property Profiles) with a live unreviewed-count badge on the sidebar tab itself, so a new
   submission is never missed among ordinary profile edits.
+- **Financing requests**: tapping "Apply for Financing" in the Customer App opens a confirm step
+  (with an optional note on what it's for) instead of redirecting anywhere — submitting creates a
+  request the office can act on, and the screen then shows its status. These land in a separate
+  **Admin Portal → Financing Requests** tab with a live new-request-count badge, showing the
+  customer's name, phone, email, service address, and note so staff can call them back and walk
+  them through applying with Synchrony.
 
 ## Setup
 
