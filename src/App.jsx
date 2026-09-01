@@ -3917,8 +3917,8 @@ function PropertyProfileDetail({ profileId, session, onBack, isTechnician, techn
         {isTechnician && (
           <button onClick={() => setSubmitOpen(true)} style={{
             width: "100%", marginTop: 24, fontFamily: BODY, fontWeight: 800, fontSize: 16, color: "#fff",
-            background: C.gold, border: "none", borderRadius: 14, padding: "17px 18px", cursor: "pointer",
-            boxShadow: "0 8px 20px rgba(217,164,65,0.45)",
+            background: C.terracotta, border: "none", borderRadius: 14, padding: "17px 18px", cursor: "pointer",
+            boxShadow: `0 8px 20px ${C.terracotta}73`,
           }}>📤 Submit for Review</button>
         )}
       </div>
