@@ -4733,8 +4733,15 @@ function AdminPortal() {
         <GhostButton full onClick={logOut}>Log Out</GhostButton>
       </div>
       <div className="admin-content" style={{ flex: 1, padding: 22, overflowY: "auto" }}>
-        <div className="admin-menu-btn" onClick={() => setSidebarOpen(true)} style={{ display: "none", width: 40, height: 40, borderRadius: 10, background: "#F1EBE0", alignItems: "center", justifyContent: "center", cursor: "pointer", marginBottom: 14 }}>
-          <Menu size={20} color={C.ink} />
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          {tab !== "dashboard" && (
+            <div className="admin-menu-btn" onClick={() => goTo("dashboard")} style={{ display: "none", width: 40, height: 40, borderRadius: 10, background: "#F1EBE0", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+              <ChevronLeft size={20} color={C.ink} />
+            </div>
+          )}
+          <div className="admin-menu-btn" onClick={() => setSidebarOpen(true)} style={{ display: "none", width: 40, height: 40, borderRadius: 10, background: "#F1EBE0", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+            <Menu size={20} color={C.ink} />
+          </div>
         </div>
         <div style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 20, marginBottom: 16 }}>{tabs.find(t => t.key === tab).label}</div>
 
